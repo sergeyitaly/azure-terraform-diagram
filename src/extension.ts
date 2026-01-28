@@ -23,6 +23,25 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(disposable);
 
+    // Register the generate from folder command (context menu)
+    const generateFromFolderCommand = vscode.commands.registerCommand(
+        'azure-terraform-diagram.generateFromFolder',
+        async (folderUri: vscode.Uri) => {
+            try {
+                if (!folderUri) {
+                    vscode.window.showErrorMessage('Please right-click on a folder to generate a diagram.');
+                    return;
+                }
+                await generateDiagram(context, folderUri.fsPath);
+            } catch (error: any) {
+                vscode.window.showErrorMessage(`Failed to generate diagram: ${error.message}`);
+                console.error('Extension error:', error);
+            }
+        }
+    );
+
+    context.subscriptions.push(generateFromFolderCommand);
+
     // Register export PNG command
     const exportPNGCommand = vscode.commands.registerCommand('azure-terraform-diagram.exportPNG', async () => {
         try {
@@ -59,6 +78,14 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
+        // Get the folder containing the saved .tf file
+        const savedFilePath = document.fileName;
+        const savedFileFolder = path.dirname(savedFilePath);
+
+        // Check if we should scope to folder or use workspace root
+        const scopeToFolder = config.get<boolean>('scopeToFolder', true);
+        const targetFolder = scopeToFolder ? savedFileFolder : undefined;
+
         // Debounce multiple saves
         if (saveDebounceTimer) {
             clearTimeout(saveDebounceTimer);
@@ -66,7 +93,8 @@ export function activate(context: vscode.ExtensionContext) {
 
         saveDebounceTimer = setTimeout(async () => {
             try {
-                await generatePNGDiagram(context);
+                // Generate PNG for the target folder (either file's folder or workspace root)
+                await generatePNGDiagram(context, targetFolder);
             } catch (error: any) {
                 console.error('Auto-generate diagram error:', error);
                 // Don't show error messages for auto-generation to avoid annoyance
@@ -79,14 +107,16 @@ export function activate(context: vscode.ExtensionContext) {
 
 /**
  * Generate PNG diagram and save to workspace
+ * @param targetFolder Optional specific folder to generate diagram for
  */
-async function generatePNGDiagram(context: vscode.ExtensionContext): Promise<void> {
+async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder?: string): Promise<void> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         return;
     }
 
-    const workspacePath = workspaceFolders[0].uri.fsPath;
+    // Use target folder if provided, otherwise use workspace root
+    const workspacePath = targetFolder || workspaceFolders[0].uri.fsPath;
 
     // Parse Terraform files
     const parser = new TerraformParser();
@@ -123,7 +153,7 @@ async function generatePNGDiagram(context: vscode.ExtensionContext): Promise<voi
     }
 }
 
-async function generateDiagram(context: vscode.ExtensionContext) {
+async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: string) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
         vscode.window.showErrorMessage('Please open a folder with Terraform files first.');
@@ -131,7 +161,8 @@ async function generateDiagram(context: vscode.ExtensionContext) {
     }
 
     const workspaceUri = workspaceFolders[0].uri;
-    const initialWorkspacePath = workspaceUri.fsPath;
+    // Use target folder if provided, otherwise use workspace root
+    const initialWorkspacePath = targetFolder || workspaceUri.fsPath;
     
     const result = await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,

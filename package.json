@@ -2,7 +2,7 @@
   "name": "azure-terraform-diagram",
   "displayName": "Azure Terraform Diagram",
   "description": "Generate Microsoft Azure-style infrastructure diagrams from Terraform projects",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "SerhiiVoinolovych",
   "icon": "media/icon.png",
   "repository": {
@@ -82,6 +82,21 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Resource types to exclude from diagram (e.g. azurerm_role_assignment)"
+        },
+        "azureTerraformDiagram.autoGenerateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically generate architecture.png when saving .tf files"
+        },
+        "azureTerraformDiagram.outputFileName": {
+          "type": "string",
+          "default": "architecture.png",
+          "description": "Output file name for the generated diagram"
+        },
+        "azureTerraformDiagram.scopeToFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, generates diagram for the folder containing the saved .tf file. When false, generates for entire workspace."
         }
       }
     }

@@ -37,9 +37,15 @@ Then press `F5` in VS Code to launch the extension in development mode.
 ### Automatic Diagram Generation
 
 Simply save any `.tf` file in your workspace. The extension automatically:
-1. Parses all Terraform files in your workspace
-2. Generates an `architecture.png` file in your workspace root
+1. Parses Terraform files in the **same folder** as the saved file
+2. Generates an `architecture.png` in that folder
 3. Shows a status bar confirmation
+
+This allows you to have **multiple Terraform projects** in one workspace (e.g., `task01/`, `task02/`) and each will get its own separate `architecture.png`.
+
+### Generate Diagram for Specific Folder
+
+Right-click on any folder in the VS Code Explorer and select **"Generate Azure Infrastructure Diagram"** to generate a diagram for just that folder's Terraform resources.
 
 ### Manual Commands
 
@@ -66,6 +72,10 @@ Configure the extension in VS Code Settings (`Cmd+,` / `Ctrl+,`):
 |---------|---------|-------------|
 | `azureTerraformDiagram.autoGenerateOnSave` | `true` | Automatically generate architecture.png when saving .tf files |
 | `azureTerraformDiagram.outputFileName` | `architecture.png` | Output file name for the generated diagram |
+| `azureTerraformDiagram.scopeToFolder` | `true` | When true, generates diagram only for the folder containing the saved .tf file. When false, generates for entire workspace. |
+| `azureTerraformDiagram.theme` | `auto` | Diagram color theme (auto, light, dark) |
+| `azureTerraformDiagram.showModuleDetails` | `true` | Show detailed module information |
+| `azureTerraformDiagram.excludeResourceTypes` | `[]` | Resource types to exclude (e.g., `azurerm_role_assignment`) |
 
 ## Supported Azure Resources
 
