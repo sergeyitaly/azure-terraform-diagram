@@ -43,7 +43,7 @@ export class TerraformParser {
      * @param workspacePath The path to scan for Terraform files
      * @param recursive Whether to scan subdirectories (default: false for folder-specific generation)
      */
-    async parseWorkspace(workspacePath: string, recursive: boolean = false): Promise<TerraformResource[]> {
+    async parseWorkspace(workspacePath: string, recursive: boolean = true): Promise<TerraformResource[]> {
         const tfFiles = this.findTerraformFiles(workspacePath, recursive);
         const resources: TerraformResource[] = [];
 
@@ -73,7 +73,7 @@ export class TerraformParser {
      * @param dir Directory to scan
      * @param recursive Whether to scan subdirectories (default: false)
      */
-    private findTerraformFiles(dir: string, recursive: boolean = false): string[] {
+    private findTerraformFiles(dir: string, recursive: boolean = true): string[] {
         const files: string[] = [];
 
         function scanDirectory(currentDir: string, isRoot: boolean) {
