@@ -5,14 +5,20 @@ Generate beautiful Microsoft Azure-style infrastructure diagrams from your Terra
 ## Features
 
 - **Auto-generate diagrams on save** - Automatically creates `architecture.png` when you save any `.tf` file
-- **Rich resource details** - Displays IP prefixes, SKUs, sizes, versions, and other crucial DevOps info directly on the diagram
+- **Resource Group Grouping** - Resources are visually grouped inside their resource groups for clear organization
+- **Rich DevOps Details** - Displays CIDR ranges, SKUs, VM sizes, TLS versions, scaling configs, backup policies, and more
+- **Multi-project Support** - Each Terraform project folder gets its own separate diagram
 - **Interactive webview** - Explore your infrastructure with pan, zoom, and click-to-navigate
-- **Smart layout** - Vertical flow with resources grouped by Azure zones (Edge, DMZ, Application, Data, etc.)
 - **Azure-style visuals** - Uses official Microsoft Azure icons and color schemes
 - **Dependency visualization** - Shows connections between resources with smart orthogonal routing
 - **Resource tooltips** - Hover for full details, click to jump to source code
 
 ## Installation
+
+### From VS Code Marketplace
+
+Search for "Azure Terraform Diagram" in VS Code Extensions, or install from:
+https://marketplace.visualstudio.com/items?itemName=SerhiiVoinolovych.azure-terraform-diagram
 
 ### From VSIX
 
@@ -20,17 +26,6 @@ Generate beautiful Microsoft Azure-style infrastructure diagrams from your Terra
 2. In VS Code, open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
 3. Run "Extensions: Install from VSIX..."
 4. Select the downloaded file
-
-### From Source
-
-```bash
-git clone <repository-url>
-cd azure-terraform-diagram
-npm install
-npm run compile
-```
-
-Then press `F5` in VS Code to launch the extension in development mode.
 
 ## Usage
 
@@ -72,122 +67,113 @@ Configure the extension in VS Code Settings (`Cmd+,` / `Ctrl+,`):
 |---------|---------|-------------|
 | `azureTerraformDiagram.autoGenerateOnSave` | `true` | Automatically generate architecture.png when saving .tf files |
 | `azureTerraformDiagram.outputFileName` | `architecture.png` | Output file name for the generated diagram |
-| `azureTerraformDiagram.scopeToFolder` | `true` | When true, generates diagram only for the folder containing the saved .tf file. When false, generates for entire workspace. |
+| `azureTerraformDiagram.scopeToFolder` | `true` | When true, generates diagram only for the folder containing the saved .tf file |
 | `azureTerraformDiagram.theme` | `auto` | Diagram color theme (auto, light, dark) |
 | `azureTerraformDiagram.showModuleDetails` | `true` | Show detailed module information |
 | `azureTerraformDiagram.excludeResourceTypes` | `[]` | Resource types to exclude (e.g., `azurerm_role_assignment`) |
 
-## Supported Azure Resources
+## DevOps-Relevant Details
 
-The extension recognizes 100+ Azure resource types including:
+The diagram displays comprehensive technical details that DevOps engineers need:
 
-**Compute**
-- Virtual Machines, VM Scale Sets
-- App Services, Function Apps
-- Azure Kubernetes Service (AKS)
-- Container Instances, Container Registry
+### Network & Connectivity
+| Resource | Details Shown |
+|----------|---------------|
+| Virtual Network | CIDR address space, DNS servers, location |
+| Subnet | CIDR prefix, service endpoints, delegations |
+| Network Interface | Private IP, allocation method, accelerated networking |
+| Public IP | Allocation method, SKU, tier, zones, DNS label |
+| NSG | Rule count, ports (allow/deny), direction |
+| VNet Peering | VNet access, forwarding, gateway transit |
 
-**Networking**
-- Virtual Networks, Subnets
-- Network Security Groups
-- Load Balancers, Application Gateway
-- Azure Firewall, Bastion
-- VPN Gateway, Express Route
+### Compute & Scaling
+| Resource | Details Shown |
+|----------|---------------|
+| Virtual Machine | Size, OS image, disk type/size, zone, admin user |
+| VM Scale Set | SKU, instance count, zones, upgrade policy |
+| AKS | K8s version, node pool VM size, node count, autoscale range, CNI plugin, network policy |
+| AKS Node Pool | VM size, node count, autoscale, zones, taints, labels |
+| App Service | Runtime, TLS version, always on, HTTPS, VNet integration |
+| Function App | Runtime version, OS type, scaling settings |
+| Container Group | OS type, CPU, memory, ports, restart policy |
 
-**Storage & Databases**
-- Storage Accounts
-- SQL Database, SQL Server
-- Cosmos DB, Redis Cache
-- PostgreSQL, MySQL
+### Storage & Data
+| Resource | Details Shown |
+|----------|---------------|
+| Storage Account | Tier + replication (e.g., `Standard_LRS`), kind, access tier, TLS version, HTTPS only |
+| SQL Server | Version, admin login, TLS version, public/private access |
+| SQL Database | SKU, max size, zone redundant, geo backup, PITR retention |
+| PostgreSQL/MySQL | SKU, version, storage size, SSL enforcement, backup retention |
+| Cosmos DB | Offer type, kind, consistency level, regions, multi-write |
+| Redis Cache | SKU, family, capacity, TLS, shards, replicas, eviction policy |
 
-**Security & Identity**
-- Key Vault
-- Managed Identities
-- Role Assignments
+### Security & Identity
+| Resource | Details Shown |
+|----------|---------------|
+| Key Vault | SKU, retention days, purge protection, RBAC, deployment flags |
+| Firewall | SKU, tier, threat intel mode, zones, policy |
+| Application Gateway | SKU, tier, capacity, autoscale, WAF, HTTP/2 |
+| Bastion | SKU, copy/paste, file copy, tunneling, scale units |
+| Private Endpoint | Subresource type, manual approval, DNS zone |
+| Role Assignment | Role name, principal type |
 
-**Monitoring**
-- Log Analytics Workspace
-- Application Insights
-- Monitor Action Groups
+### Monitoring & Management
+| Resource | Details Shown |
+|----------|---------------|
+| Log Analytics | SKU, retention days, daily quota |
+| Application Insights | App type, retention, sampling %, daily cap |
+| Action Group | Email/SMS/webhook receivers |
+| Recovery Vault | SKU, soft delete, storage mode, cross-region |
+| Backup Policy | Frequency, daily/weekly/monthly retention |
 
-And many more...
+### Integration & Messaging
+| Resource | Details Shown |
+|----------|---------------|
+| Event Hub | SKU, capacity, auto-inflate, max throughput units |
+| Service Bus | SKU, capacity, zone redundant, partitions |
+| API Management | SKU, publisher, VNet type, zones |
 
-## Resource Details Shown
+## Layout
 
-Each resource displays relevant technical details directly on the diagram:
-
-| Resource Type | Details Shown |
-|--------------|---------------|
-| Virtual Network | Address space (e.g., `10.0.0.0/16`) |
-| Subnet | Address prefix (e.g., `10.0.1.0/24`) |
-| Network Interface | Private IP, subnet prefix |
-| Public IP | IP address, allocation method, SKU |
-| NSG | Number of security rules |
-| Virtual Machine | VM size (e.g., `Standard_D2s_v3`) |
-| Storage Account | Tier + replication (e.g., `Standard_LRS`) |
-| SQL Database | SKU, max size |
-| AKS | Kubernetes version, SKU tier |
-| App Service | SKU, HTTPS setting |
-| App Service Plan | SKU, OS type |
-| Firewall | SKU name and tier |
-| Application Gateway | SKU, tier, capacity |
-| Key Vault | SKU, retention days |
-| Redis Cache | SKU, family, capacity |
-| Cosmos DB | Offer type, kind |
-| Container Registry | SKU, admin status |
-| Log Analytics | SKU, retention days |
-| Application Insights | Application type, retention |
-| Load Balancer | SKU |
-| VPN Gateway | Type, SKU |
-
-## Layout & Zones
-
-Resources are automatically organized into architectural zones:
+Resources are automatically grouped by **Resource Group** for clear organization:
 
 ```
-┌─────────────────────────────────────┐
-│              Edge                   │  CDN, Front Door, Traffic Manager
-├─────────────────────────────────────┤
-│              DMZ                    │  Firewall, Bastion, NAT Gateway
-├─────────────────────────────────────┤
-│          Presentation               │  App Service, Static Sites
-├─────────────────────────────────────┤
-│          Application                │  VMs, AKS, Containers
-├─────────────────────────────────────┤
-│             Data                    │  SQL, Cosmos, Storage, Redis
-├─────────────────────────────────────┤
-│          Management                 │  Log Analytics, App Insights
-├─────────────────────────────────────┤
-│           Identity                  │  Key Vault, Managed Identity
-└─────────────────────────────────────┘
+┌─────────────── Resource Group: rg-production ───────────────┐
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │ Virtual Net  │  │   Subnet     │  │     NSG      │       │
+│  │ 10.0.0.0/16  │  │ 10.0.1.0/24  │  │  5 rules     │       │
+│  └──────────────┘  └──────────────┘  └──────────────┘       │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐                         │
+│  │  Linux VM    │  │   Storage    │                         │
+│  │ Standard_D2s │  │ Standard_LRS │                         │
+│  └──────────────┘  └──────────────┘                         │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Multiple resources of the same type are displayed **horizontally** within their zone.
+Within each resource group, resources are organized by type with multiple instances displayed horizontally.
 
-## Example Output
+## Supported Azure Resources (100+)
 
-Given a Terraform project with typical Azure resources, the extension generates:
+**Compute**: Virtual Machines, VM Scale Sets, App Services, Function Apps, AKS, Container Instances, Container Registry, Batch
 
-```
-┌──────────────────── Edge ────────────────────┐
-│  [App Gateway]   [Front Door]                │
-└──────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────── Application ──────────────┐
-│  [App Service 1]  [App Service 2]  [AKS]     │
-└──────────────────────────────────────────────┘
-                      │
-                      ▼
-┌──────────────────── Data ────────────────────┐
-│  [SQL Server]   [Storage]   [Redis Cache]    │
-└──────────────────────────────────────────────┘
-```
+**Networking**: Virtual Networks, Subnets, NSGs, Load Balancers, Application Gateway, Azure Firewall, Bastion, VPN Gateway, Express Route, NAT Gateway, Private Endpoints, DNS Zones, Front Door, CDN
+
+**Storage & Databases**: Storage Accounts, Blob Containers, File Shares, Managed Disks, SQL Server/Database, PostgreSQL, MySQL, Cosmos DB, Redis Cache
+
+**Security & Identity**: Key Vault, Managed Identities, Role Assignments, Firewall Policies
+
+**Monitoring**: Log Analytics, Application Insights, Action Groups, Metric Alerts, Diagnostic Settings
+
+**Integration**: Event Hub, Service Bus, API Management, Logic Apps
+
+**Backup & Recovery**: Recovery Services Vault, Backup Policies
 
 ## Requirements
 
 - VS Code 1.80.0 or higher
-- Node.js 16+ (for development)
 - Terraform files with Azure resources (`azurerm_*`)
 
 ### Optional Dependencies
@@ -214,6 +200,11 @@ The extension requires the `sharp` library for PNG output. If it fails:
 - Check that files are valid Terraform syntax
 - Look for parsing errors in the Output panel
 
+### Resources from multiple folders mixed together
+
+- Enable `scopeToFolder` setting (enabled by default)
+- Right-click on specific folder to generate diagram for just that folder
+
 ## Development
 
 ```bash
@@ -237,11 +228,13 @@ azure-terraform-diagram/
 ├── src/
 │   ├── extension.ts        # Extension entry point
 │   ├── terraformParser.ts  # Terraform HCL parser
-│   ├── diagramLayout.ts    # Layout algorithms
-│   ├── diagramRenderer.ts  # SVG/PNG generation
+│   ├── diagramLayout.ts    # Layout algorithms (zone & resource group grouping)
+│   ├── diagramRenderer.ts  # SVG/PNG generation with DevOps details
 │   └── azureIconMapper.ts  # Resource to icon mapping
 ├── resources/
 │   └── azure-icons/        # Azure service icons
+├── media/
+│   └── icon.png           # Extension icon
 ├── package.json
 └── tsconfig.json
 ```
@@ -253,6 +246,8 @@ MIT
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
+
+GitHub: https://github.com/sergeyitaly/azure-terraform-diagram
 
 ---
 

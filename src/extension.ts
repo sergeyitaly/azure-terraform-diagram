@@ -66,7 +66,9 @@ export function activate(context: vscode.ExtensionContext) {
     // Register save listener for .tf files
     const saveListener = vscode.workspace.onDidSaveTextDocument(async (document) => {
         // Check if it's a Terraform file
-        if (!document.fileName.endsWith('.tf')) {
+        if (!document.fileName.endsWith('.tf') && 
+            !document.fileName.endsWith('.tfvars') && 
+            !document.fileName.endsWith('.tf.json')) {
             return;
         }
 
@@ -84,7 +86,22 @@ export function activate(context: vscode.ExtensionContext) {
 
         // Check if we should scope to folder or use workspace root
         const scopeToFolder = config.get<boolean>('scopeToFolder', true);
-        const targetFolder = scopeToFolder ? savedFileFolder : undefined;
+        
+        // Determine target folder based on scope setting
+        let targetFolder: string | undefined;
+        if (scopeToFolder) {
+            targetFolder = savedFileFolder;
+        } else {
+            // Use workspace root
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (workspaceFolders && workspaceFolders.length > 0) {
+                targetFolder = workspaceFolders[0].uri.fsPath;
+            }
+        }
+
+        if (!targetFolder) {
+            return;
+        }
 
         // Debounce multiple saves
         if (saveDebounceTimer) {
@@ -107,6 +124,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 /**
  * Generate PNG diagram and save to workspace
+ * @param context Extension context
  * @param targetFolder Optional specific folder to generate diagram for
  */
 async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder?: string): Promise<void> {
@@ -120,10 +138,14 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
 
     // Parse Terraform files - use non-recursive scan for folder-specific generation
     const parser = new TerraformParser();
-    const isSpecificFolder = targetFolder !== undefined;
-    const resources = await parser.parseWorkspace(workspacePath, !isSpecificFolder);
+    
+    // IMPORTANT: When targetFolder is specified (folder-scoped), use non-recursive
+    // When no targetFolder (full workspace), use recursive
+    const useRecursive = !targetFolder;
+    const resources = await parser.parseWorkspace(workspacePath, useRecursive);
 
     if (resources.length === 0) {
+        console.log(`No Terraform resources found in ${workspacePath}`);
         return; // No resources, skip generation
     }
 
@@ -141,11 +163,12 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
 
     try {
         await renderer.generatePNG(diagramNodes, outputPath, resources);
-        console.log(`Generated ${outputFileName}`);
+        console.log(`Generated ${outputFileName} in ${workspacePath}`);
 
         // Show status bar message briefly
-        vscode.window.setStatusBarMessage(`$(check) Updated ${outputFileName}`, 3000);
+        vscode.window.setStatusBarMessage(`$(check) Updated ${path.basename(outputFileName)}`, 3000);
     } catch (error: any) {
+        console.error('PNG generation failed, falling back to SVG:', error.message);
         // If PNG fails, try SVG
         const svgPath = outputPath.replace('.png', '.svg');
         renderer.generateSVGFile(diagramNodes, svgPath, resources);
@@ -154,6 +177,11 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
     }
 }
 
+/**
+ * Generate interactive diagram in webview
+ * @param context Extension context
+ * @param targetFolder Optional specific folder to generate diagram for
+ */
 async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: string) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
@@ -174,8 +202,9 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
 
         const parser = new TerraformParser();
         // Use non-recursive scan when a specific folder is targeted
-        const isSpecificFolder = targetFolder !== undefined;
-        const resources = await parser.parseWorkspace(initialWorkspacePath, !isSpecificFolder);
+        // Use recursive scan when generating for entire workspace
+        const useRecursive = !targetFolder;
+        const resources = await parser.parseWorkspace(initialWorkspacePath, useRecursive);
         
         if (token.isCancellationRequested) {
             return null;
@@ -249,6 +278,9 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
                     return;
                 case 'alert':
                     vscode.window.showInformationMessage(message.text);
+                    return;
+                case 'webviewReady':
+                    console.log('Webview ready:', message.data);
                     return;
             }
         },

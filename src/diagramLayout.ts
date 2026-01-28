@@ -57,7 +57,7 @@ export interface DiagramOptions {
     hideImplicitDependencies?: boolean;
     hideCrossEnvironment?: boolean;
     
-    groupBy?: 'zone' | 'function' | 'layer' | 'none';
+    groupBy?: 'zone' | 'function' | 'layer' | 'resourceGroup' | 'none';
     
     theme?: 'light' | 'dark' | 'blueprint';
     showGrid?: boolean;
@@ -155,7 +155,7 @@ export class DiagramLayout {
             showCriticalConnectionsOnly: true,
             maxConnectionsPerResource: 2,
             hideImplicitDependencies: true,
-            groupBy: 'zone',
+            groupBy: 'resourceGroup',  // Changed default to resourceGroup
             theme: 'light',
             showTitles: true,
             compactMode: false,
@@ -164,16 +164,24 @@ export class DiagramLayout {
             padding: this.DEFAULT_PADDING,
             ...options
         };
-        
+
         const filteredResources = this.filterResources(resources, mergedOptions);
-        
+
         if (filteredResources.length === 0) {
             return [];
         }
-        
+
+        // If groupBy is resourceGroup, use the resource group layout
+        if (mergedOptions.groupBy === 'resourceGroup') {
+            let nodes = this.createResourceGroupLayout(filteredResources, dependencies, mergedOptions);
+            nodes = this.applyStyling(nodes, mergedOptions);
+            this.ensureWithinBounds(nodes, mergedOptions);
+            return nodes;
+        }
+
         const layoutMethod = mergedOptions.layout || 'flow';
         let nodes: DiagramNode[] = [];
-        
+
         switch (layoutMethod) {
             case 'layered':
                 nodes = this.createLayeredLayout(filteredResources, dependencies, mergedOptions);
@@ -1003,7 +1011,7 @@ export class DiagramLayout {
     
     private static groupResourcesByZone(resources: TerraformResource[]): Map<string, TerraformResource[]> {
         const map = new Map<string, TerraformResource[]>();
-        
+
         resources.forEach(resource => {
             const zone = this.determineResourceZone(resource);
             if (!map.has(zone)) {
@@ -1011,7 +1019,270 @@ export class DiagramLayout {
             }
             map.get(zone)!.push(resource);
         });
-        
+
+        return map;
+    }
+
+    /**
+     * Create layout grouped by resource group
+     * Resources are organized into resource group containers, with resources inside grouped by type
+     */
+    private static createResourceGroupLayout(
+        resources: TerraformResource[],
+        dependencies: Map<string, string[]>,
+        options: DiagramOptions
+    ): DiagramNode[] {
+        const nodes: DiagramNode[] = [];
+        const padding = options.padding || this.DEFAULT_PADDING;
+        const availableWidth = (options.width || this.DEFAULT_WIDTH) - 2 * padding;
+
+        const resourceWidth = options.compactMode ? 140 : 180;
+        const resourceHeight = options.compactMode ? 52 : 64;
+        const colSpacing = 12;
+        const rowSpacing = 8;
+        const maxPerRow = 4;
+        const rgGap = 25;
+        const headerHeight = 32;
+        const containerPadding = 15;
+
+        // Group resources by resource group
+        const resourcesByRG = this.groupResourcesByResourceGroup(resources);
+
+        // Sort resource groups: put 'default' last
+        const rgNames = Array.from(resourcesByRG.keys()).sort((a, b) => {
+            if (a === 'default') return 1;
+            if (b === 'default') return -1;
+            return a.localeCompare(b);
+        });
+
+        let currentY = padding;
+
+        rgNames.forEach((rgName) => {
+            const rgResources = resourcesByRG.get(rgName) || [];
+            if (rgResources.length === 0) return;
+
+            // Separate resource group resource from other resources
+            const rgResource = rgResources.find(r => r.type === 'azurerm_resource_group');
+            const otherResources = rgResources.filter(r => r.type !== 'azurerm_resource_group');
+
+            // Group other resources by type
+            const resourcesByType = new Map<string, TerraformResource[]>();
+            otherResources.forEach(resource => {
+                if (!resourcesByType.has(resource.type)) {
+                    resourcesByType.set(resource.type, []);
+                }
+                resourcesByType.get(resource.type)!.push(resource);
+            });
+
+            // Calculate container dimensions
+            let totalRows = 0;
+            let maxRowWidth = 0;
+            resourcesByType.forEach((typeResources) => {
+                const rows = Math.ceil(typeResources.length / maxPerRow);
+                totalRows += rows;
+                const itemsInRow = Math.min(typeResources.length, maxPerRow);
+                const rowWidth = itemsInRow * resourceWidth + (itemsInRow - 1) * colSpacing;
+                maxRowWidth = Math.max(maxRowWidth, rowWidth);
+            });
+
+            // Add row for the resource group resource itself if it exists
+            if (rgResource) {
+                totalRows += 1;
+                maxRowWidth = Math.max(maxRowWidth, resourceWidth);
+            }
+
+            const containerWidth = Math.max(maxRowWidth + containerPadding * 2, 250);
+            const containerHeight = headerHeight + totalRows * (resourceHeight + rowSpacing) + containerPadding;
+            const containerX = padding + (availableWidth - containerWidth) / 2;
+
+            // Create resource group container
+            const containerId = `rg_container_${rgName}`;
+            const rgContainer: DiagramNode = {
+                id: containerId,
+                type: 'resource-group-container',
+                name: rgName,
+                x: containerX,
+                y: currentY,
+                width: containerWidth,
+                height: containerHeight,
+                connections: [],
+                category: 'General',
+                level: 0,
+                isGroupContainer: true,
+                children: [],
+                color: '#E6F2FF',
+                zone: rgName,
+                displayName: `Resource Group: ${rgName}`
+            };
+            nodes.push(rgContainer);
+
+            let nodeY = currentY + headerHeight;
+
+            // First, render the resource group resource itself (if exists)
+            if (rgResource) {
+                const nodeId = `${rgResource.type}_${rgResource.name}`;
+                const resourceInfo = AzureIconMapper.getResourceInfo(rgResource.type);
+                const nodeX = containerX + (containerWidth - resourceWidth) / 2;
+
+                const rgNode: DiagramNode = {
+                    id: nodeId,
+                    type: rgResource.type,
+                    name: rgResource.name,
+                    x: nodeX,
+                    y: nodeY,
+                    width: resourceWidth,
+                    height: resourceHeight,
+                    connections: dependencies.get(nodeId) || [],
+                    networkInfo: rgResource.networkInfo,
+                    securityRules: rgResource.securityRules,
+                    category: resourceInfo.category,
+                    tags: rgResource.tags,
+                    environment: this.extractEnvironment(rgResource),
+                    module: rgResource.module,
+                    level: 1,
+                    parentGroup: containerId,
+                    color: this.MICROSOFT_COLORS[resourceInfo.category],
+                    zone: rgName,
+                    icon: resourceInfo.icon,
+                    displayName: this.getDisplayName(rgResource)
+                };
+                nodes.push(rgNode);
+                rgContainer.children!.push(nodeId);
+
+                nodeY += resourceHeight + rowSpacing + 5; // Extra gap after RG resource
+            }
+
+            // Then render other resources grouped by type
+            // Sort types to show important ones first (networking, compute, storage, etc.)
+            const sortedTypes = Array.from(resourcesByType.keys()).sort((a, b) => {
+                const order: Record<string, number> = {
+                    'azurerm_virtual_network': 1,
+                    'azurerm_subnet': 2,
+                    'azurerm_network_security_group': 3,
+                    'azurerm_public_ip': 4,
+                    'azurerm_network_interface': 5,
+                    'azurerm_linux_virtual_machine': 10,
+                    'azurerm_windows_virtual_machine': 10,
+                    'azurerm_virtual_machine': 10,
+                    'azurerm_storage_account': 20,
+                    'azurerm_key_vault': 30
+                };
+                const orderA = order[a] || 100;
+                const orderB = order[b] || 100;
+                return orderA - orderB;
+            });
+
+            sortedTypes.forEach((type) => {
+                const typeResources = resourcesByType.get(type) || [];
+                const totalItems = typeResources.length;
+                const rowCount = Math.ceil(totalItems / maxPerRow);
+
+                for (let row = 0; row < rowCount; row++) {
+                    const rowStart = row * maxPerRow;
+                    const rowEnd = Math.min(rowStart + maxPerRow, totalItems);
+                    const itemsInRow = rowEnd - rowStart;
+
+                    // Center this row within the container
+                    const totalRowWidth = itemsInRow * resourceWidth + (itemsInRow - 1) * colSpacing;
+                    const rowStartX = containerX + (containerWidth - totalRowWidth) / 2;
+
+                    for (let col = 0; col < itemsInRow; col++) {
+                        const resource = typeResources[rowStart + col];
+                        const nodeId = `${resource.type}_${resource.name}`;
+                        const resourceInfo = AzureIconMapper.getResourceInfo(resource.type);
+
+                        const nodeX = rowStartX + col * (resourceWidth + colSpacing);
+                        const actualY = nodeY + row * (resourceHeight + rowSpacing);
+
+                        const node: DiagramNode = {
+                            id: nodeId,
+                            type: resource.type,
+                            name: resource.name,
+                            x: nodeX,
+                            y: actualY,
+                            width: resourceWidth,
+                            height: resourceHeight,
+                            connections: dependencies.get(nodeId) || [],
+                            networkInfo: resource.networkInfo,
+                            securityRules: resource.securityRules,
+                            category: resourceInfo.category,
+                            tags: resource.tags,
+                            environment: this.extractEnvironment(resource),
+                            module: resource.module,
+                            level: 1,
+                            parentGroup: containerId,
+                            color: this.MICROSOFT_COLORS[resourceInfo.category],
+                            zone: rgName,
+                            icon: resourceInfo.icon,
+                            displayName: this.getDisplayName(resource)
+                        };
+                        nodes.push(node);
+                        rgContainer.children!.push(nodeId);
+                    }
+                }
+
+                nodeY += rowCount * (resourceHeight + rowSpacing);
+            });
+
+            // Update container height based on actual content
+            rgContainer.height = nodeY - currentY + containerPadding;
+
+            currentY = nodeY + rgGap;
+        });
+
+        return nodes;
+    }
+
+    /**
+     * Extract resource group name from a resource
+     */
+    private static extractResourceGroupName(resource: TerraformResource): string {
+        // Check direct attribute
+        if (resource.attributes?.resource_group_name) {
+            const rgName = resource.attributes.resource_group_name;
+            // Handle variable references like azurerm_resource_group.main.name
+            if (typeof rgName === 'string') {
+                const match = rgName.match(/azurerm_resource_group\.([^.]+)/);
+                if (match) return match[1];
+                // Handle var references
+                if (rgName.startsWith('var.')) return rgName.replace('var.', '');
+                // Handle local references
+                if (rgName.startsWith('local.')) return rgName.replace('local.', '');
+                return rgName;
+            }
+        }
+
+        // If this IS a resource group, return its name
+        if (resource.type === 'azurerm_resource_group') {
+            return resource.name;
+        }
+
+        return 'default';
+    }
+
+    /**
+     * Group resources by their resource group
+     */
+    private static groupResourcesByResourceGroup(resources: TerraformResource[]): Map<string, TerraformResource[]> {
+        const map = new Map<string, TerraformResource[]>();
+
+        // First, find all resource groups
+        const resourceGroups = resources.filter(r => r.type === 'azurerm_resource_group');
+        resourceGroups.forEach(rg => {
+            map.set(rg.name, [rg]);
+        });
+
+        // Then assign other resources to their resource groups
+        resources.forEach(resource => {
+            if (resource.type === 'azurerm_resource_group') return; // Already added
+
+            const rgName = this.extractResourceGroupName(resource);
+            if (!map.has(rgName)) {
+                map.set(rgName, []);
+            }
+            map.get(rgName)!.push(resource);
+        });
+
         return map;
     }
     

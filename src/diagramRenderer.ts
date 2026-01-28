@@ -56,6 +56,7 @@ export class DiagramRenderer {
 
     /**
      * Get resource detail lines (IP, SKU, size, etc.) - returns array for multi-line display
+     * Enhanced with DevOps-relevant information
      */
     private getResourceDetails(node: DiagramNode): string[] {
         const resource = this.resourceMap.get(node.id);
@@ -63,6 +64,7 @@ export class DiagramRenderer {
 
         const ni = resource.networkInfo || {};
         const attr = resource.attributes || {};
+        const tags = resource.tags || {};
         const details: string[] = [];
 
         // Helper to add non-empty values
@@ -70,7 +72,7 @@ export class DiagramRenderer {
             if (value && value.trim()) details.push(value.trim());
         };
 
-        // Helper to extract reference name
+        // Helper to extract reference name from Terraform reference
         const extractRef = (value: any): string => {
             if (typeof value === 'string') {
                 const match = value.match(/azurerm_\w+\.([^.]+)/);
@@ -79,55 +81,82 @@ export class DiagramRenderer {
             return String(value);
         };
 
+        // Helper to format tags for display
+        const formatTags = (): string | undefined => {
+            const importantTags = ['environment', 'env', 'owner', 'cost-center', 'project'];
+            const found: string[] = [];
+            importantTags.forEach(t => {
+                if (tags[t]) found.push(`${t}:${tags[t]}`);
+            });
+            return found.length > 0 ? found.slice(0, 2).join(' ') : undefined;
+        };
+
         // Resource Group
         if (node.type === 'azurerm_resource_group') {
             add(attr.location);
+            add(formatTags());
             return details;
         }
 
-        // VNet: address space
+        // VNet: address space + DNS + peering info
         if (node.type === 'azurerm_virtual_network') {
             if (attr.address_space) {
                 const space = Array.isArray(attr.address_space) ? attr.address_space.join(', ') : attr.address_space;
-                add(space);
+                add(`CIDR: ${space}`);
             }
             add(attr.location);
             if (attr.dns_servers && Array.isArray(attr.dns_servers) && attr.dns_servers.length > 0) {
                 add(`DNS: ${attr.dns_servers.join(', ')}`);
             }
+            if (attr.bgp_community) add(`BGP: ${attr.bgp_community}`);
+            add(formatTags());
             return details;
         }
 
-        // Subnet: CIDR prefix
+        // VNet Peering
+        if (node.type === 'azurerm_virtual_network_peering') {
+            if (attr.allow_virtual_network_access) add('VNet Access: Yes');
+            if (attr.allow_forwarded_traffic) add('Forwarding: Yes');
+            if (attr.allow_gateway_transit) add('Gateway Transit');
+            if (attr.use_remote_gateways) add('Use Remote GW');
+            return details;
+        }
+
+        // Subnet: CIDR prefix + delegations + service endpoints
         if (node.type === 'azurerm_subnet') {
             if (attr.address_prefixes) {
                 const p = Array.isArray(attr.address_prefixes) ? attr.address_prefixes.join(', ') : attr.address_prefixes;
-                add(p);
+                add(`CIDR: ${p}`);
             } else if (attr.address_prefix) {
-                add(attr.address_prefix);
+                add(`CIDR: ${attr.address_prefix}`);
             } else if (ni.addressPrefix) {
-                add(ni.addressPrefix.split(' in ')[0]);
+                add(`CIDR: ${ni.addressPrefix.split(' in ')[0]}`);
             }
             if (attr.service_endpoints && Array.isArray(attr.service_endpoints)) {
-                add(`Endpoints: ${attr.service_endpoints.length}`);
+                const endpoints = attr.service_endpoints.map((e: string) => e.replace('Microsoft.', '')).slice(0, 3);
+                add(`Endpoints: ${endpoints.join(', ')}`);
             }
             if (attr.delegation) {
-                add('Delegated');
+                const del = Array.isArray(attr.delegation) ? attr.delegation[0] : attr.delegation;
+                if (del && del.name) add(`Delegation: ${del.name}`);
             }
+            if (attr.private_endpoint_network_policies_enabled === false) add('PE Policies: Off');
             return details;
         }
 
-        // NIC: private IP + subnet ref
+        // NIC: private IP + subnet ref + accelerated networking
         if (node.type === 'azurerm_network_interface') {
-            if (ni.privateIpAddress) add(`IP: ${ni.privateIpAddress}`);
+            if (ni.privateIpAddress) add(`Private IP: ${ni.privateIpAddress}`);
             if (attr.ip_configuration) {
                 const ipConfig = Array.isArray(attr.ip_configuration) ? attr.ip_configuration[0] : attr.ip_configuration;
                 if (ipConfig) {
                     if (ipConfig.private_ip_address) add(`IP: ${ipConfig.private_ip_address}`);
                     if (ipConfig.private_ip_address_allocation) add(ipConfig.private_ip_address_allocation);
+                    if (ipConfig.public_ip_address_id) add('Has Public IP');
                 }
             }
-            if (attr.enable_accelerated_networking) add('Accelerated');
+            if (attr.enable_accelerated_networking) add('Accelerated NW');
+            if (attr.enable_ip_forwarding) add('IP Forwarding');
             return details;
         }
 
@@ -138,54 +167,82 @@ export class DiagramRenderer {
             if (attr.sku_tier) add(`Tier: ${attr.sku_tier}`);
             if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
             if (attr.domain_name_label) add(`DNS: ${attr.domain_name_label}`);
+            if (attr.ip_version) add(attr.ip_version);
+            if (attr.idle_timeout_in_minutes) add(`Timeout: ${attr.idle_timeout_in_minutes}m`);
             return details;
         }
 
-        // NSG: rule count + key rules
+        // NSG: rule count + key rules with ports
         if (node.type === 'azurerm_network_security_group') {
             if (resource.securityRules && resource.securityRules.length > 0) {
                 add(`${resource.securityRules.length} security rules`);
-                // Show first few rule names
-                const ruleNames = resource.securityRules.slice(0, 2).map(r => r.name).join(', ');
-                if (ruleNames) add(ruleNames);
+                // Show ports from first few rules
+                const portsInfo = resource.securityRules.slice(0, 3).map(r => {
+                    const port = r.destinationPortRange || '*';
+                    const access = r.access === 'Allow' ? '✓' : '✗';
+                    return `${access}${port}`;
+                }).join(' ');
+                if (portsInfo) add(portsInfo);
             }
+            add(attr.location);
             return details;
         }
 
-        // NSG Rule
+        // NSG Rule - detailed
         if (node.type === 'azurerm_network_security_rule') {
-            if (attr.direction) add(attr.direction);
-            if (attr.access) add(attr.access);
-            if (attr.protocol) add(`Protocol: ${attr.protocol}`);
-            if (attr.destination_port_range) add(`Port: ${attr.destination_port_range}`);
+            add(`${attr.direction || ''} ${attr.access || ''}`);
+            if (attr.protocol) add(`Proto: ${attr.protocol}`);
+            if (attr.source_port_range) add(`Src: ${attr.source_port_range}`);
+            if (attr.destination_port_range) add(`Dst: ${attr.destination_port_range}`);
+            if (attr.source_address_prefix) add(`From: ${attr.source_address_prefix}`);
+            if (attr.destination_address_prefix) add(`To: ${attr.destination_address_prefix}`);
             if (attr.priority) add(`Priority: ${attr.priority}`);
             return details;
         }
 
-        // VM: size + OS
+        // VM: size + OS + disk + networking
         if (node.type.includes('virtual_machine') || node.type.includes('linux_virtual_machine') || node.type.includes('windows_virtual_machine')) {
             const size = attr.size || attr.vm_size;
-            if (size) add(size);
-            if (attr.admin_username) add(`User: ${attr.admin_username}`);
+            if (size) add(`Size: ${size}`);
+            if (attr.admin_username) add(`Admin: ${attr.admin_username}`);
             if (attr.source_image_reference) {
                 const img = attr.source_image_reference;
                 if (typeof img === 'object') {
-                    add(`${img.publisher || ''}/${img.offer || ''}`);
-                    if (img.sku) add(`SKU: ${img.sku}`);
+                    const os = `${img.offer || ''}${img.sku ? ' ' + img.sku : ''}`;
+                    if (os.trim()) add(`OS: ${os.trim()}`);
                 }
             }
             if (attr.os_disk) {
                 const disk = attr.os_disk;
                 if (typeof disk === 'object') {
-                    if (disk.storage_account_type) add(`Disk: ${disk.storage_account_type}`);
-                    if (disk.disk_size_gb) add(`${disk.disk_size_gb}GB`);
+                    const diskInfo = [];
+                    if (disk.storage_account_type) diskInfo.push(disk.storage_account_type);
+                    if (disk.disk_size_gb) diskInfo.push(`${disk.disk_size_gb}GB`);
+                    if (disk.caching) diskInfo.push(disk.caching);
+                    if (diskInfo.length) add(`Disk: ${diskInfo.join(' ')}`);
                 }
             }
             if (attr.zone) add(`Zone: ${attr.zone}`);
+            if (attr.availability_set_id) add('In Avail Set');
+            if (attr.proximity_placement_group_id) add('PPG');
+            if (attr.boot_diagnostics) add('Boot Diag');
+            if (attr.identity) add('Managed ID');
+            add(formatTags());
             return details;
         }
 
-        // Storage account
+        // VM Scale Set
+        if (node.type === 'azurerm_virtual_machine_scale_set' || node.type.includes('orchestrated_virtual_machine_scale_set')) {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.instances) add(`Instances: ${attr.instances}`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.upgrade_policy_mode) add(`Upgrade: ${attr.upgrade_policy_mode}`);
+            if (attr.overprovision !== undefined) add(`Overprov: ${attr.overprovision}`);
+            if (attr.single_placement_group !== undefined) add(`Single PG: ${attr.single_placement_group}`);
+            return details;
+        }
+
+        // Storage account - comprehensive
         if (node.type === 'azurerm_storage_account') {
             if (attr.account_tier && attr.account_replication_type) {
                 add(`${attr.account_tier}_${attr.account_replication_type}`);
@@ -193,67 +250,170 @@ export class DiagramRenderer {
             if (attr.account_kind) add(attr.account_kind);
             if (attr.access_tier) add(`Access: ${attr.access_tier}`);
             if (attr.min_tls_version) add(`TLS: ${attr.min_tls_version}`);
-            if (attr.enable_https_traffic_only) add('HTTPS only');
+            if (attr.enable_https_traffic_only || attr.https_traffic_only_enabled) add('HTTPS only');
+            if (attr.allow_nested_items_to_be_public === false) add('No public blobs');
+            if (attr.is_hns_enabled) add('HNS (ADLS)');
+            if (attr.nfsv3_enabled) add('NFSv3');
+            if (attr.large_file_share_enabled) add('Large Files');
+            if (attr.network_rules) {
+                const nr = attr.network_rules;
+                if (typeof nr === 'object' && nr.default_action) {
+                    add(`Default: ${nr.default_action}`);
+                }
+            }
+            add(formatTags());
             return details;
         }
 
         // Storage container
         if (node.type === 'azurerm_storage_container') {
             if (attr.container_access_type) add(`Access: ${attr.container_access_type}`);
+            if (attr.metadata) add('Has Metadata');
             return details;
         }
 
-        // SQL Server
+        // Storage share (File)
+        if (node.type === 'azurerm_storage_share') {
+            if (attr.quota) add(`Quota: ${attr.quota}GB`);
+            if (attr.access_tier) add(`Tier: ${attr.access_tier}`);
+            if (attr.enabled_protocol) add(`Protocol: ${attr.enabled_protocol}`);
+            return details;
+        }
+
+        // Managed Disk
+        if (node.type === 'azurerm_managed_disk') {
+            if (attr.storage_account_type) add(attr.storage_account_type);
+            if (attr.disk_size_gb) add(`${attr.disk_size_gb}GB`);
+            if (attr.disk_iops_read_write) add(`IOPS: ${attr.disk_iops_read_write}`);
+            if (attr.disk_mbps_read_write) add(`MBps: ${attr.disk_mbps_read_write}`);
+            if (attr.zone) add(`Zone: ${attr.zone}`);
+            if (attr.network_access_policy) add(`Net: ${attr.network_access_policy}`);
+            return details;
+        }
+
+        // SQL Server - comprehensive
         if (node.type === 'azurerm_sql_server' || node.type === 'azurerm_mssql_server') {
-            if (attr.version) add(`v${attr.version}`);
+            if (attr.version) add(`SQL v${attr.version}`);
             if (attr.administrator_login) add(`Admin: ${attr.administrator_login}`);
             if (attr.minimum_tls_version) add(`TLS: ${attr.minimum_tls_version}`);
-            if (attr.public_network_access_enabled === false) add('Private');
+            if (attr.public_network_access_enabled === false) add('Private only');
+            if (attr.outbound_network_restriction_enabled) add('Outbound restricted');
+            if (attr.azuread_administrator) add('AAD Admin');
+            if (attr.identity) add('Managed ID');
+            add(attr.location);
+            add(formatTags());
             return details;
         }
 
-        // SQL Database
+        // SQL Database - comprehensive
         if (node.type === 'azurerm_sql_database' || node.type === 'azurerm_mssql_database') {
-            if (attr.sku_name) add(attr.sku_name);
-            if (attr.max_size_gb) add(`${attr.max_size_gb}GB`);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.max_size_gb) add(`Max: ${attr.max_size_gb}GB`);
             if (attr.collation) add(attr.collation);
-            if (attr.zone_redundant) add('Zone redundant');
-            if (attr.read_scale) add('Read scale');
+            if (attr.zone_redundant) add('Zone Redundant');
+            if (attr.read_scale) add('Read Scale-out');
+            if (attr.geo_backup_enabled) add('Geo Backup');
+            if (attr.license_type) add(`License: ${attr.license_type}`);
+            if (attr.min_capacity) add(`Min vCores: ${attr.min_capacity}`);
+            if (attr.auto_pause_delay_in_minutes) add(`AutoPause: ${attr.auto_pause_delay_in_minutes}m`);
+            if (attr.short_term_retention_policy) {
+                const stp = attr.short_term_retention_policy;
+                if (typeof stp === 'object' && stp.retention_days) {
+                    add(`PITR: ${stp.retention_days}d`);
+                }
+            }
+            if (attr.long_term_retention_policy) add('LTR enabled');
+            add(formatTags());
             return details;
         }
 
-        // PostgreSQL / MySQL
+        // SQL Elastic Pool
+        if (node.type === 'azurerm_mssql_elasticpool') {
+            if (attr.sku) {
+                const sku = attr.sku;
+                if (typeof sku === 'object') {
+                    if (sku.name) add(`SKU: ${sku.name}`);
+                    if (sku.tier) add(`Tier: ${sku.tier}`);
+                    if (sku.capacity) add(`DTU/vCore: ${sku.capacity}`);
+                }
+            }
+            if (attr.max_size_gb) add(`Max: ${attr.max_size_gb}GB`);
+            if (attr.zone_redundant) add('Zone Redundant');
+            return details;
+        }
+
+        // PostgreSQL / MySQL - comprehensive
         if (node.type.includes('postgresql') || node.type.includes('mysql')) {
-            if (attr.sku_name) add(attr.sku_name);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
             if (attr.version) add(`v${attr.version}`);
-            if (attr.storage_mb) add(`${Math.round(attr.storage_mb / 1024)}GB`);
+            if (attr.storage_mb) add(`Storage: ${Math.round(attr.storage_mb / 1024)}GB`);
             if (attr.administrator_login) add(`Admin: ${attr.administrator_login}`);
             if (attr.ssl_enforcement_enabled) add('SSL enforced');
+            if (attr.ssl_minimal_tls_version_enforced) add(`TLS: ${attr.ssl_minimal_tls_version_enforced}`);
+            if (attr.geo_redundant_backup_enabled) add('Geo Backup');
+            if (attr.backup_retention_days) add(`Backup: ${attr.backup_retention_days}d`);
+            if (attr.auto_grow_enabled) add('Auto Grow');
+            if (attr.public_network_access_enabled === false) add('Private');
+            if (attr.high_availability) add('HA enabled');
+            add(formatTags());
             return details;
         }
 
-        // AKS
+        // AKS - comprehensive DevOps info
         if (node.type === 'azurerm_kubernetes_cluster') {
-            if (attr.kubernetes_version) add(`k8s ${attr.kubernetes_version}`);
-            if (attr.sku_tier) add(attr.sku_tier);
+            if (attr.kubernetes_version) add(`K8s: ${attr.kubernetes_version}`);
+            if (attr.sku_tier) add(`Tier: ${attr.sku_tier}`);
             if (attr.default_node_pool) {
                 const pool = attr.default_node_pool;
                 if (typeof pool === 'object') {
-                    if (pool.vm_size) add(pool.vm_size);
+                    if (pool.vm_size) add(`VM: ${pool.vm_size}`);
                     if (pool.node_count) add(`Nodes: ${pool.node_count}`);
-                    if (pool.min_count && pool.max_count) add(`Scale: ${pool.min_count}-${pool.max_count}`);
+                    if (pool.min_count !== undefined && pool.max_count !== undefined) {
+                        add(`Autoscale: ${pool.min_count}-${pool.max_count}`);
+                    }
+                    if (pool.zones && Array.isArray(pool.zones)) add(`Zones: ${pool.zones.join(',')}`);
+                    if (pool.os_disk_size_gb) add(`OS Disk: ${pool.os_disk_size_gb}GB`);
+                    if (pool.os_disk_type) add(`Disk: ${pool.os_disk_type}`);
                 }
             }
             if (attr.network_profile) {
                 const net = attr.network_profile;
-                if (typeof net === 'object' && net.network_plugin) {
-                    add(`Network: ${net.network_plugin}`);
+                if (typeof net === 'object') {
+                    if (net.network_plugin) add(`CNI: ${net.network_plugin}`);
+                    if (net.network_policy) add(`Policy: ${net.network_policy}`);
+                    if (net.service_cidr) add(`Svc CIDR: ${net.service_cidr}`);
+                    if (net.dns_service_ip) add(`DNS IP: ${net.dns_service_ip}`);
+                    if (net.load_balancer_sku) add(`LB: ${net.load_balancer_sku}`);
                 }
             }
+            if (attr.private_cluster_enabled) add('Private Cluster');
+            if (attr.azure_policy_enabled) add('Azure Policy');
+            if (attr.role_based_access_control_enabled) add('RBAC');
+            if (attr.oidc_issuer_enabled) add('OIDC');
+            if (attr.workload_identity_enabled) add('Workload ID');
+            if (attr.automatic_channel_upgrade) add(`Upgrade: ${attr.automatic_channel_upgrade}`);
+            if (attr.identity) add('Managed ID');
+            add(formatTags());
             return details;
         }
 
-        // App Service / Web App
+        // AKS Node Pool
+        if (node.type === 'azurerm_kubernetes_cluster_node_pool') {
+            if (attr.vm_size) add(`VM: ${attr.vm_size}`);
+            if (attr.node_count) add(`Nodes: ${attr.node_count}`);
+            if (attr.min_count !== undefined && attr.max_count !== undefined) {
+                add(`Autoscale: ${attr.min_count}-${attr.max_count}`);
+            }
+            if (attr.os_type) add(`OS: ${attr.os_type}`);
+            if (attr.os_disk_size_gb) add(`Disk: ${attr.os_disk_size_gb}GB`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.node_taints && Array.isArray(attr.node_taints)) add(`Taints: ${attr.node_taints.length}`);
+            if (attr.node_labels) add('Has Labels');
+            if (attr.mode) add(`Mode: ${attr.mode}`);
+            return details;
+        }
+
+        // App Service / Web App - comprehensive
         if (node.type === 'azurerm_app_service' || node.type === 'azurerm_linux_web_app' || node.type === 'azurerm_windows_web_app') {
             if (attr.https_only) add('HTTPS only');
             if (attr.site_config) {
@@ -261,101 +421,151 @@ export class DiagramRenderer {
                 if (typeof cfg === 'object') {
                     if (cfg.always_on) add('Always On');
                     if (cfg.http2_enabled) add('HTTP/2');
-                    if (cfg.minimum_tls_version) add(`TLS ${cfg.minimum_tls_version}`);
+                    if (cfg.minimum_tls_version) add(`TLS: ${cfg.minimum_tls_version}`);
                     if (cfg.ftps_state) add(`FTPS: ${cfg.ftps_state}`);
-                }
-            }
-            return details;
-        }
-
-        // Service Plan
-        if (node.type === 'azurerm_app_service_plan' || node.type === 'azurerm_service_plan') {
-            if (attr.sku_name) add(attr.sku_name);
-            if (attr.os_type) add(attr.os_type);
-            if (attr.worker_count) add(`Workers: ${attr.worker_count}`);
-            if (attr.zone_balancing_enabled) add('Zone balanced');
-            if (attr.sku && typeof attr.sku === 'object') {
-                if (attr.sku.tier) add(attr.sku.tier);
-                if (attr.sku.size) add(attr.sku.size);
-            }
-            return details;
-        }
-
-        // Function App
-        if (node.type === 'azurerm_function_app' || node.type === 'azurerm_linux_function_app' || node.type === 'azurerm_windows_function_app') {
-            if (attr.os_type) add(attr.os_type);
-            if (attr.https_only) add('HTTPS only');
-            if (attr.site_config) {
-                const cfg = attr.site_config;
-                if (typeof cfg === 'object') {
+                    if (cfg.health_check_path) add(`Health: ${cfg.health_check_path}`);
+                    if (cfg.worker_count) add(`Workers: ${cfg.worker_count}`);
                     if (cfg.application_stack) {
                         const stack = cfg.application_stack;
                         if (typeof stack === 'object') {
-                            const runtime = stack.node_version || stack.python_version || stack.dotnet_version || stack.java_version;
-                            if (runtime) add(`Runtime: ${runtime}`);
+                            const ver = stack.node_version || stack.python_version || stack.dotnet_version || stack.java_version;
+                            if (ver) add(`Runtime: ${ver}`);
                         }
                     }
                 }
             }
+            if (attr.virtual_network_subnet_id) add('VNet Integrated');
+            if (attr.identity) add('Managed ID');
+            add(formatTags());
             return details;
         }
 
-        // Firewall
+        // Service Plan - comprehensive
+        if (node.type === 'azurerm_app_service_plan' || node.type === 'azurerm_service_plan') {
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.os_type) add(attr.os_type);
+            if (attr.worker_count) add(`Workers: ${attr.worker_count}`);
+            if (attr.zone_balancing_enabled) add('Zone Balanced');
+            if (attr.maximum_elastic_worker_count) add(`Max Elastic: ${attr.maximum_elastic_worker_count}`);
+            if (attr.sku && typeof attr.sku === 'object') {
+                if (attr.sku.tier) add(`Tier: ${attr.sku.tier}`);
+                if (attr.sku.size) add(`Size: ${attr.sku.size}`);
+            }
+            add(formatTags());
+            return details;
+        }
+
+        // Function App - comprehensive
+        if (node.type === 'azurerm_function_app' || node.type === 'azurerm_linux_function_app' || node.type === 'azurerm_windows_function_app') {
+            if (attr.os_type) add(attr.os_type);
+            if (attr.https_only) add('HTTPS only');
+            if (attr.functions_extension_version) add(`Runtime: ${attr.functions_extension_version}`);
+            if (attr.site_config) {
+                const cfg = attr.site_config;
+                if (typeof cfg === 'object') {
+                    if (cfg.always_on) add('Always On');
+                    if (cfg.application_stack) {
+                        const stack = cfg.application_stack;
+                        if (typeof stack === 'object') {
+                            const runtime = stack.node_version || stack.python_version || stack.dotnet_version || stack.java_version;
+                            if (runtime) add(`Stack: ${runtime}`);
+                        }
+                    }
+                }
+            }
+            if (attr.virtual_network_subnet_id) add('VNet Integrated');
+            if (attr.identity) add('Managed ID');
+            add(formatTags());
+            return details;
+        }
+
+        // Firewall - comprehensive
         if (node.type === 'azurerm_firewall') {
-            if (attr.sku_name) add(attr.sku_name);
-            if (attr.sku_tier) add(attr.sku_tier);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.sku_tier) add(`Tier: ${attr.sku_tier}`);
             if (attr.threat_intel_mode) add(`Threat Intel: ${attr.threat_intel_mode}`);
             if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.firewall_policy_id) add('Has Policy');
+            add(formatTags());
             return details;
         }
 
-        // Application Gateway
+        // Application Gateway - comprehensive
         if (node.type === 'azurerm_application_gateway') {
             if (attr.sku && typeof attr.sku === 'object') {
-                if (attr.sku.name) add(attr.sku.name);
-                if (attr.sku.tier) add(attr.sku.tier);
+                if (attr.sku.name) add(`SKU: ${attr.sku.name}`);
+                if (attr.sku.tier) add(`Tier: ${attr.sku.tier}`);
                 if (attr.sku.capacity) add(`Capacity: ${attr.sku.capacity}`);
+            }
+            if (attr.autoscale_configuration) {
+                const as = attr.autoscale_configuration;
+                if (typeof as === 'object') {
+                    add(`Scale: ${as.min_capacity || 0}-${as.max_capacity || '?'}`);
+                }
             }
             if (attr.enable_http2) add('HTTP/2');
             if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.waf_configuration || attr.firewall_policy_id) add('WAF enabled');
+            add(formatTags());
             return details;
         }
 
         // NAT Gateway
         if (node.type === 'azurerm_nat_gateway') {
-            if (attr.sku_name) add(attr.sku_name);
-            if (attr.idle_timeout_in_minutes) add(`Timeout: ${attr.idle_timeout_in_minutes}m`);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.idle_timeout_in_minutes) add(`Idle: ${attr.idle_timeout_in_minutes}m`);
             if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
             return details;
         }
 
-        // Load Balancer
+        // Load Balancer - comprehensive
         if (node.type === 'azurerm_lb') {
-            if (attr.sku) add(attr.sku);
-            if (attr.sku_name) add(attr.sku_name);
-            if (attr.sku_tier) add(attr.sku_tier);
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.sku_tier) add(`Tier: ${attr.sku_tier}`);
+            if (attr.frontend_ip_configuration) {
+                const fips = Array.isArray(attr.frontend_ip_configuration) ? attr.frontend_ip_configuration : [attr.frontend_ip_configuration];
+                add(`Frontends: ${fips.length}`);
+            }
+            add(formatTags());
             return details;
         }
 
-        // Key Vault
+        // Key Vault - comprehensive
         if (node.type === 'azurerm_key_vault') {
-            if (attr.sku_name) add(attr.sku_name);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
             if (attr.soft_delete_retention_days) add(`Retention: ${attr.soft_delete_retention_days}d`);
-            if (attr.purge_protection_enabled) add('Purge protected');
-            if (attr.enable_rbac_authorization) add('RBAC enabled');
+            if (attr.purge_protection_enabled) add('Purge Protected');
+            if (attr.enable_rbac_authorization) add('RBAC Auth');
+            if (attr.enabled_for_deployment) add('VM Deploy');
+            if (attr.enabled_for_disk_encryption) add('Disk Encrypt');
+            if (attr.public_network_access_enabled === false) add('Private');
+            add(formatTags());
             return details;
         }
 
-        // Redis Cache
+        // Redis Cache - comprehensive
         if (node.type === 'azurerm_redis_cache') {
-            if (attr.sku_name) add(attr.sku_name);
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
             if (attr.family && attr.capacity) add(`${attr.family}${attr.capacity}`);
-            if (attr.minimum_tls_version) add(`TLS ${attr.minimum_tls_version}`);
+            if (attr.minimum_tls_version) add(`TLS: ${attr.minimum_tls_version}`);
             if (attr.enable_non_ssl_port === false) add('SSL only');
+            if (attr.shard_count) add(`Shards: ${attr.shard_count}`);
+            if (attr.replicas_per_master) add(`Replicas: ${attr.replicas_per_master}`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.redis_configuration) {
+                const cfg = attr.redis_configuration;
+                if (typeof cfg === 'object') {
+                    if (cfg.maxmemory_policy) add(`Evict: ${cfg.maxmemory_policy}`);
+                    if (cfg.rdb_backup_enabled) add('RDB Backup');
+                    if (cfg.aof_backup_enabled) add('AOF Backup');
+                }
+            }
+            add(formatTags());
             return details;
         }
 
-        // Cosmos DB
+        // Cosmos DB - comprehensive
         if (node.type === 'azurerm_cosmosdb_account') {
             if (attr.offer_type) add(attr.offer_type);
             if (attr.kind) add(attr.kind);
@@ -365,113 +575,266 @@ export class DiagramRenderer {
                     add(`Consistency: ${cp.consistency_level}`);
                 }
             }
-            if (attr.is_virtual_network_filter_enabled) add('VNet filtered');
+            if (attr.geo_location) {
+                const locs = Array.isArray(attr.geo_location) ? attr.geo_location : [attr.geo_location];
+                add(`Regions: ${locs.length}`);
+            }
+            if (attr.is_virtual_network_filter_enabled) add('VNet Filter');
+            if (attr.enable_automatic_failover) add('Auto Failover');
+            if (attr.enable_multiple_write_locations) add('Multi-Write');
+            if (attr.public_network_access_enabled === false) add('Private');
+            if (attr.analytical_storage_enabled) add('Analytical');
+            add(formatTags());
             return details;
         }
 
-        // Container group
+        // Container group - comprehensive
         if (node.type === 'azurerm_container_group') {
             if (attr.os_type) add(attr.os_type);
             if (attr.ip_address_type) add(attr.ip_address_type);
             if (attr.restart_policy) add(`Restart: ${attr.restart_policy}`);
+            if (attr.dns_name_label) add(`DNS: ${attr.dns_name_label}`);
             if (ni.ports && ni.ports.length) add(`Ports: ${ni.ports.join(',')}`);
+            if (attr.container) {
+                const containers = Array.isArray(attr.container) ? attr.container : [attr.container];
+                add(`Containers: ${containers.length}`);
+                const c = containers[0];
+                if (c && typeof c === 'object') {
+                    if (c.cpu) add(`CPU: ${c.cpu}`);
+                    if (c.memory) add(`Mem: ${c.memory}GB`);
+                }
+            }
+            add(formatTags());
             return details;
         }
 
-        // Container Registry
+        // Container Registry - comprehensive
         if (node.type === 'azurerm_container_registry') {
-            if (attr.sku) add(attr.sku);
+            if (attr.sku) add(`SKU: ${attr.sku}`);
             if (attr.admin_enabled) add('Admin enabled');
             if (attr.public_network_access_enabled === false) add('Private');
-            if (attr.zone_redundancy_enabled) add('Zone redundant');
+            if (attr.zone_redundancy_enabled) add('Zone Redundant');
+            if (attr.georeplications) {
+                const geos = Array.isArray(attr.georeplications) ? attr.georeplications : [attr.georeplications];
+                add(`Geo-replicas: ${geos.length}`);
+            }
+            if (attr.retention_policy) add('Retention Policy');
+            if (attr.trust_policy) add('Content Trust');
+            if (attr.quarantine_policy_enabled) add('Quarantine');
+            add(formatTags());
             return details;
         }
 
-        // Log Analytics
+        // Log Analytics - comprehensive
         if (node.type === 'azurerm_log_analytics_workspace') {
-            if (attr.sku) add(attr.sku);
+            if (attr.sku) add(`SKU: ${attr.sku}`);
             if (attr.retention_in_days) add(`Retention: ${attr.retention_in_days}d`);
             if (attr.daily_quota_gb) add(`Quota: ${attr.daily_quota_gb}GB/day`);
+            if (attr.internet_ingestion_enabled === false) add('No Internet Ingest');
+            if (attr.internet_query_enabled === false) add('No Internet Query');
+            if (attr.reservation_capacity_in_gb_per_day) add(`Reserved: ${attr.reservation_capacity_in_gb_per_day}GB`);
+            add(formatTags());
             return details;
         }
 
-        // Application Insights
+        // Application Insights - comprehensive
         if (node.type === 'azurerm_application_insights') {
             if (attr.application_type) add(attr.application_type);
             if (attr.retention_in_days) add(`Retention: ${attr.retention_in_days}d`);
             if (attr.sampling_percentage) add(`Sampling: ${attr.sampling_percentage}%`);
+            if (attr.daily_data_cap_in_gb) add(`Cap: ${attr.daily_data_cap_in_gb}GB/day`);
+            if (attr.disable_ip_masking) add('IP Not Masked');
+            if (attr.workspace_id) add('LA Workspace');
+            add(formatTags());
             return details;
         }
 
-        // Route table
+        // Monitor Action Group
+        if (node.type === 'azurerm_monitor_action_group') {
+            if (attr.email_receiver) {
+                const emails = Array.isArray(attr.email_receiver) ? attr.email_receiver : [attr.email_receiver];
+                add(`Email: ${emails.length}`);
+            }
+            if (attr.sms_receiver) add('SMS');
+            if (attr.webhook_receiver) add('Webhook');
+            if (attr.azure_function_receiver) add('Function');
+            if (attr.logic_app_receiver) add('Logic App');
+            if (attr.arm_role_receiver) add('ARM Role');
+            return details;
+        }
+
+        // Monitor Alert Rule
+        if (node.type.includes('monitor_metric_alert') || node.type.includes('monitor_activity_log_alert')) {
+            if (attr.severity) add(`Severity: ${attr.severity}`);
+            if (attr.frequency) add(`Freq: ${attr.frequency}`);
+            if (attr.window_size) add(`Window: ${attr.window_size}`);
+            if (attr.auto_mitigate) add('Auto Mitigate');
+            return details;
+        }
+
+        // Route table - comprehensive
         if (node.type === 'azurerm_route_table') {
             add('UDR');
             if (attr.disable_bgp_route_propagation) add('BGP disabled');
+            if (attr.route) {
+                const routes = Array.isArray(attr.route) ? attr.route : [attr.route];
+                add(`Routes: ${routes.length}`);
+            }
             return details;
         }
 
         // Route
         if (node.type === 'azurerm_route') {
-            if (attr.address_prefix) add(attr.address_prefix);
+            if (attr.address_prefix) add(`Prefix: ${attr.address_prefix}`);
             if (attr.next_hop_type) add(`→ ${attr.next_hop_type}`);
-            if (attr.next_hop_in_ip_address) add(attr.next_hop_in_ip_address);
+            if (attr.next_hop_in_ip_address) add(`Next: ${attr.next_hop_in_ip_address}`);
             return details;
         }
 
-        // VPN Gateway
+        // VPN Gateway - comprehensive
         if (node.type === 'azurerm_virtual_network_gateway') {
             if (attr.type) add(attr.type);
-            if (attr.sku) add(attr.sku);
+            if (attr.sku) add(`SKU: ${attr.sku}`);
             if (attr.vpn_type) add(attr.vpn_type);
             if (attr.active_active) add('Active-Active');
+            if (attr.enable_bgp) add('BGP enabled');
+            if (attr.generation) add(`Gen${attr.generation}`);
+            if (attr.private_ip_address_enabled) add('Private IP');
             return details;
         }
 
-        // Express Route
+        // Express Route - comprehensive
         if (node.type === 'azurerm_express_route_circuit') {
             if (attr.service_provider_name) add(attr.service_provider_name);
-            if (attr.bandwidth_in_mbps) add(`${attr.bandwidth_in_mbps}Mbps`);
+            if (attr.bandwidth_in_mbps) add(`BW: ${attr.bandwidth_in_mbps}Mbps`);
             if (attr.peering_location) add(attr.peering_location);
-            return details;
-        }
-
-        // Bastion
-        if (node.type === 'azurerm_bastion_host') {
-            if (attr.sku) add(attr.sku);
-            if (attr.copy_paste_enabled) add('Copy/Paste');
-            if (attr.file_copy_enabled) add('File copy');
-            if (attr.tunneling_enabled) add('Tunneling');
-            return details;
-        }
-
-        // Private Endpoint
-        if (node.type === 'azurerm_private_endpoint') {
-            if (attr.private_service_connection) {
-                const psc = attr.private_service_connection;
-                if (typeof psc === 'object') {
-                    if (psc.subresource_names && Array.isArray(psc.subresource_names)) {
-                        add(psc.subresource_names.join(', '));
-                    }
+            if (attr.sku) {
+                const sku = attr.sku;
+                if (typeof sku === 'object') {
+                    if (sku.tier) add(`Tier: ${sku.tier}`);
+                    if (sku.family) add(`Family: ${sku.family}`);
                 }
             }
             return details;
         }
 
+        // Bastion - comprehensive
+        if (node.type === 'azurerm_bastion_host') {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.copy_paste_enabled) add('Copy/Paste');
+            if (attr.file_copy_enabled) add('File Copy');
+            if (attr.tunneling_enabled) add('Tunneling');
+            if (attr.ip_connect_enabled) add('IP Connect');
+            if (attr.shareable_link_enabled) add('Shareable Link');
+            if (attr.scale_units) add(`Scale: ${attr.scale_units}`);
+            return details;
+        }
+
+        // Private Endpoint - comprehensive
+        if (node.type === 'azurerm_private_endpoint') {
+            if (attr.private_service_connection) {
+                const psc = attr.private_service_connection;
+                if (typeof psc === 'object') {
+                    if (psc.subresource_names && Array.isArray(psc.subresource_names)) {
+                        add(`Subresource: ${psc.subresource_names.join(', ')}`);
+                    }
+                    if (psc.is_manual_connection) add('Manual approval');
+                }
+            }
+            if (attr.private_dns_zone_group) add('DNS Zone linked');
+            return details;
+        }
+
         // Private DNS Zone
         if (node.type === 'azurerm_private_dns_zone') {
-            // Just show the zone name is enough
+            add(attr.location || 'Global');
+            return details;
+        }
+
+        // Private DNS Zone VNet Link
+        if (node.type === 'azurerm_private_dns_zone_virtual_network_link') {
+            if (attr.registration_enabled) add('Auto-register');
             return details;
         }
 
         // Managed Identity
         if (node.type === 'azurerm_user_assigned_identity') {
             add(attr.location || '');
+            add(formatTags());
             return details;
         }
 
-        // Role Assignment
+        // Role Assignment - comprehensive
         if (node.type === 'azurerm_role_assignment') {
-            if (attr.role_definition_name) add(attr.role_definition_name);
+            if (attr.role_definition_name) add(`Role: ${attr.role_definition_name}`);
+            if (attr.principal_type) add(`Type: ${attr.principal_type}`);
+            return details;
+        }
+
+        // Recovery Services Vault
+        if (node.type === 'azurerm_recovery_services_vault') {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.soft_delete_enabled) add('Soft Delete');
+            if (attr.storage_mode_type) add(`Storage: ${attr.storage_mode_type}`);
+            if (attr.cross_region_restore_enabled) add('Cross-Region');
+            add(formatTags());
+            return details;
+        }
+
+        // Backup Policy VM
+        if (node.type === 'azurerm_backup_policy_vm') {
+            if (attr.backup && attr.backup.frequency) add(`Freq: ${attr.backup.frequency}`);
+            if (attr.retention_daily && attr.retention_daily.count) add(`Daily: ${attr.retention_daily.count}d`);
+            if (attr.retention_weekly) add('Weekly retention');
+            if (attr.retention_monthly) add('Monthly retention');
+            if (attr.retention_yearly) add('Yearly retention');
+            return details;
+        }
+
+        // DNS Zone
+        if (node.type === 'azurerm_dns_zone') {
+            if (attr.zone_type) add(`Type: ${attr.zone_type}`);
+            return details;
+        }
+
+        // Front Door
+        if (node.type === 'azurerm_frontdoor' || node.type === 'azurerm_cdn_frontdoor_profile') {
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.load_balancer_enabled === false) add('LB Disabled');
+            return details;
+        }
+
+        // CDN Profile
+        if (node.type === 'azurerm_cdn_profile') {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            return details;
+        }
+
+        // Event Hub
+        if (node.type === 'azurerm_eventhub_namespace') {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.capacity) add(`Capacity: ${attr.capacity}`);
+            if (attr.auto_inflate_enabled) add('Auto-inflate');
+            if (attr.maximum_throughput_units) add(`Max TU: ${attr.maximum_throughput_units}`);
+            if (attr.zone_redundant) add('Zone Redundant');
+            return details;
+        }
+
+        // Service Bus
+        if (node.type === 'azurerm_servicebus_namespace') {
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.capacity) add(`Capacity: ${attr.capacity}`);
+            if (attr.zone_redundant) add('Zone Redundant');
+            if (attr.premium_messaging_partitions) add(`Partitions: ${attr.premium_messaging_partitions}`);
+            return details;
+        }
+
+        // API Management
+        if (node.type === 'azurerm_api_management') {
+            if (attr.sku_name) add(`SKU: ${attr.sku_name}`);
+            if (attr.publisher_name) add(`Publisher: ${attr.publisher_name}`);
+            if (attr.virtual_network_type) add(`VNet: ${attr.virtual_network_type}`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
             return details;
         }
 
@@ -548,8 +911,13 @@ export class DiagramRenderer {
         });
 
         // Draw group containers first (behind resource nodes)
+        // Render resource group containers with special styling
         nodes.filter(n => n.isGroupContainer).forEach(node => {
-            svg += this.renderGroupContainer(node, offsetX, offsetY);
+            if (node.type === 'resource-group-container') {
+                svg += this.renderResourceGroupContainer(node, offsetX, offsetY);
+            } else {
+                svg += this.renderGroupContainer(node, offsetX, offsetY);
+            }
         });
 
         // Draw resource nodes on top
@@ -587,6 +955,36 @@ export class DiagramRenderer {
     <line x1="${x}" y1="${y + 24}" x2="${x + node.width}" y2="${y + 24}"
           stroke="rgba(0, 0, 0, 0.06)" stroke-width="1"/>
     <text x="${x + 12}" y="${y + 16}" class="zone-label">${this.escapeXml(node.name)}</text>
+  </g>`;
+    }
+
+    private renderResourceGroupContainer(node: DiagramNode, offsetX: number, offsetY: number): string {
+        const x = node.x + offsetX;
+        const y = node.y + offsetY;
+        const displayName = node.displayName || `Resource Group: ${node.name}`;
+
+        // Azure-style resource group container with blue accent
+        return `
+  <g>
+    <!-- Main container with shadow -->
+    <rect x="${x + 2}" y="${y + 2}" width="${node.width}" height="${node.height}"
+          rx="8" ry="8" fill="rgba(0,0,0,0.05)"/>
+    <rect x="${x}" y="${y}" width="${node.width}" height="${node.height}"
+          rx="8" ry="8" fill="#FAFAFA" stroke="#0078D4" stroke-width="2"/>
+    <!-- Header bar -->
+    <rect x="${x}" y="${y}" width="${node.width}" height="28"
+          rx="8" ry="8" fill="rgba(0, 120, 212, 0.1)"/>
+    <rect x="${x}" y="${y + 20}" width="${node.width}" height="8" fill="#FAFAFA"/>
+    <line x1="${x}" y1="${y + 28}" x2="${x + node.width}" y2="${y + 28}"
+          stroke="rgba(0, 120, 212, 0.2)" stroke-width="1"/>
+    <!-- Resource Group icon (simplified) -->
+    <rect x="${x + 8}" y="${y + 6}" width="16" height="16" rx="2" fill="#0078D4"/>
+    <rect x="${x + 11}" y="${y + 9}" width="4" height="4" rx="1" fill="white"/>
+    <rect x="${x + 17}" y="${y + 9}" width="4" height="4" rx="1" fill="white"/>
+    <rect x="${x + 11}" y="${y + 15}" width="4" height="4" rx="1" fill="white"/>
+    <rect x="${x + 17}" y="${y + 15}" width="4" height="4" rx="1" fill="white"/>
+    <!-- Title -->
+    <text x="${x + 30}" y="${y + 18}" class="zone-label" fill="#0078D4">${this.escapeXml(displayName)}</text>
   </g>`;
     }
 

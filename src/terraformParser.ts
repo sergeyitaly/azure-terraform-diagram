@@ -7,12 +7,12 @@ export interface TerraformResource {
     file: string;
     line?: number;
     attributes: Record<string, any>;
-    module?: string; // NEW: Module name if resource is inside a module
+    module?: string;
     modulePath?: string;
     dependencies: string[];
     securityRules?: SecurityRule[];
     networkInfo?: NetworkInfo;
-    tags?: Record<string, string>; // NEW: Resource tags
+    tags?: Record<string, string>;
 }
 
 export interface SecurityRule {
@@ -43,13 +43,13 @@ export class TerraformParser {
      * @param workspacePath The path to scan for Terraform files
      * @param recursive Whether to scan subdirectories (default: false for folder-specific generation)
      */
-    async parseWorkspace(workspacePath: string, recursive: boolean = true): Promise<TerraformResource[]> {
+    async parseWorkspace(workspacePath: string, recursive: boolean = false): Promise<TerraformResource[]> {
         const tfFiles = this.findTerraformFiles(workspacePath, recursive);
         const resources: TerraformResource[] = [];
 
         console.log(`[TerraformParser] Scanning path: ${workspacePath} (recursive: ${recursive})`);
         console.log(`[TerraformParser] Found ${tfFiles.length} Terraform files`);
-        tfFiles.forEach(f => console.log(`  - ${f}`));
+        tfFiles.forEach(f => console.log(`  - ${path.relative(workspacePath, f) || f}`));
 
         for (const file of tfFiles) {
             try {
@@ -73,29 +73,55 @@ export class TerraformParser {
      * @param dir Directory to scan
      * @param recursive Whether to scan subdirectories (default: false)
      */
-    private findTerraformFiles(dir: string, recursive: boolean = true): string[] {
+    private findTerraformFiles(dir: string, recursive: boolean = false): string[] {
         const files: string[] = [];
+        const ignoredDirs = ['.terraform', '.git', 'node_modules', 'dist', 'build', 'target'];
 
-        function scanDirectory(currentDir: string, isRoot: boolean) {
+        function scanDirectory(currentDir: string, depth: number = 0) {
             try {
+                // For recursive=false, only scan root directory (depth=0)
+                if (!recursive && depth > 0) {
+                    return;
+                }
+
                 const items = fs.readdirSync(currentDir, { withFileTypes: true });
 
                 for (const item of items) {
+                    // Skip hidden files/directories
+                    if (item.name.startsWith('.')) {
+                        continue;
+                    }
+
                     const fullPath = path.join(currentDir, item.name);
 
                     if (item.isDirectory()) {
-                        // Only recurse into subdirectories if recursive is true OR if we're at root level
-                        // and the subdirectory looks like a Terraform module (contains .tf files)
-                        if (recursive && !item.name.startsWith('.') &&
-                            !['node_modules', '.terraform', '.git', 'dist', 'build', 'target'].includes(item.name)) {
-                            scanDirectory(fullPath, false);
+                        // Skip ignored directories
+                        if (ignoredDirs.includes(item.name)) {
+                            continue;
                         }
-                    } else if (item.isFile() &&
-                              (item.name.endsWith('.tf') ||
-                               item.name.endsWith('.tf.json') ||
-                               item.name.endsWith('.tfvars') ||
-                               item.name === 'terraform.tfstate')) {
-                        files.push(fullPath);
+
+                        // Special handling for 'modules' directory
+                        // Always scan modules directory even when recursive=false
+                        if (item.name === 'modules' || currentDir.includes('modules/')) {
+                            scanDirectory(fullPath, depth + 1);
+                        } else if (recursive) {
+                            // Only recurse into other directories if recursive=true
+                            scanDirectory(fullPath, depth + 1);
+                        }
+                    } else if (item.isFile()) {
+                        // Check for Terraform files
+                        const isTerraformFile = 
+                            item.name.endsWith('.tf') ||
+                            item.name.endsWith('.tf.json') ||
+                            item.name === 'terraform.tfvars' ||
+                            item.name === '.terraform.lock.hcl';
+                        
+                        // For terraform.tfstate, only include if it's in the root
+                        if (item.name === 'terraform.tfstate' && depth === 0) {
+                            files.push(fullPath);
+                        } else if (isTerraformFile) {
+                            files.push(fullPath);
+                        }
                     }
                 }
             } catch (error) {
@@ -103,7 +129,7 @@ export class TerraformParser {
             }
         }
 
-        scanDirectory(dir, true);
+        scanDirectory(dir, 0);
         return files;
     }
     
@@ -152,7 +178,7 @@ export class TerraformParser {
                         dependencies: [],
                         securityRules: parseResult.securityRules,
                         networkInfo: parseResult.networkInfo,
-                        tags: parseResult.tags // NEW: Extract tags during parsing
+                        tags: parseResult.tags
                     };
                     
                     resources.push(resource);
@@ -175,7 +201,7 @@ export class TerraformParser {
                         dependencies: [],
                         securityRules: [],
                         networkInfo: {},
-                        tags: {} // NEW: Empty tags for module
+                        tags: {}
                     };
                     resources.push(moduleResource);
                 }
@@ -198,7 +224,7 @@ export class TerraformParser {
                         dependencies: [],
                         securityRules: [],
                         networkInfo: {},
-                        tags: parseResult.tags // NEW: Extract tags for data sources too
+                        tags: parseResult.tags
                     };
                     
                     resources.push(resource);
@@ -217,7 +243,7 @@ export class TerraformParser {
         const attributes: Record<string, any> = {};
         let securityRules: SecurityRule[] = [];
         let networkInfo: NetworkInfo = {};
-        let tags: Record<string, string> = {}; // NEW: Initialize tags object
+        let tags: Record<string, string> = {};
         let braceCount = 0;
         let inBlock = false;
         let endLine = startLine;
@@ -247,7 +273,7 @@ export class TerraformParser {
                     
                     value = value.replace(/#.*$/, '').trim();
                     
-                    // NEW: Handle tags attribute specially
+                    // Handle tags attribute specially
                     if (key === 'tags' && resourceType.includes('azurerm_')) {
                         const parsedTags = this.parseTagsValue(value, lines, i);
                         if (parsedTags) {
@@ -277,10 +303,9 @@ export class TerraformParser {
             }
         }
         
-        return { attributes, securityRules, networkInfo, tags, endLine }; // NEW: Return tags
+        return { attributes, securityRules, networkInfo, tags, endLine };
     }
     
-    // NEW: Parse tags from Terraform attributes
     private parseTagsValue(value: string, lines: string[], currentLine: number): Record<string, string> | undefined {
         const tags: Record<string, string> = {};
         
@@ -312,7 +337,6 @@ export class TerraformParser {
         return Object.keys(tags).length > 0 ? tags : undefined;
     }
     
-    // NEW: Extract tags and module info from all resources
     private extractTagsAndModuleInfo(resources: TerraformResource[]): void {
         resources.forEach(resource => {
             // If tags weren't extracted during parsing, try to extract them from attributes
@@ -340,7 +364,6 @@ export class TerraformParser {
         });
     }
     
-    // NEW: Extract tags from attributes object
     private extractTagsFromAttributes(tagsAttr: any): Record<string, string> | undefined {
         const tags: Record<string, string> = {};
         
@@ -796,7 +819,7 @@ export class TerraformParser {
                                 dependencies: [],
                                 securityRules: [],
                                 networkInfo: {},
-                                tags: instance.attributes?.tags || {} // NEW: Extract tags from state
+                                tags: instance.attributes?.tags || {}
                             };
                             
                             resources.push(resource);
@@ -829,7 +852,6 @@ export class TerraformParser {
         return map;
     }
     
-    // NEW: Get resources grouped by module
     getResourcesByModule(resources: TerraformResource[]): Map<string, TerraformResource[]> {
         const map = new Map<string, TerraformResource[]>();
         
@@ -844,7 +866,6 @@ export class TerraformParser {
         return map;
     }
     
-    // NEW: Get resources grouped by environment tag
     getResourcesByEnvironment(resources: TerraformResource[]): Map<string, TerraformResource[]> {
         const map = new Map<string, TerraformResource[]>();
         
