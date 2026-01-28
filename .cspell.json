@@ -1,0 +1,18 @@
+{
+    "version": "0.2",
+    "language": "en",
+    "words": [
+      "frontdoor",
+      "servicebus",
+      "eventgrid",
+      "tfvars",
+      "tfstate",
+      "azurerm",
+      "terraform",
+      "webview",
+      "cosmosdb",
+      "postgresql",
+      "eventhubs",
+      "Entra"
+    ]
+  }

@@ -1,0 +1,101 @@
+{
+  "name": "azure-terraform-diagram",
+  "displayName": "Azure Terraform Diagram",
+  "description": "Generate Microsoft Azure-style infrastructure diagrams from Terraform projects",
+  "version": "0.1.0",
+  "publisher": "SerhiiVoinolovych",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sergeyitaly/azure-terraform-diagram"
+  },
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "terraform",
+    "azure",
+    "diagram",
+    "infrastructure",
+    "architecture"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "azure-terraform-diagram.generate",
+        "title": "Generate Azure Infrastructure Diagram",
+        "category": "Azure Terraform"
+      },
+      {
+        "command": "azure-terraform-diagram.generateFromFolder",
+        "title": "Generate Azure Infrastructure Diagram",
+        "category": "Azure Terraform"
+      },
+      {
+        "command": "azure-terraform-diagram.export",
+        "title": "Export Diagram as SVG",
+        "category": "Azure Terraform"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "when": "explorerResourceIsFolder",
+          "command": "azure-terraform-diagram.generateFromFolder",
+          "group": "azure-terraform@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "azure-terraform-diagram.generate",
+          "when": "workspaceFolderCount > 0"
+        },
+        {
+          "command": "azure-terraform-diagram.export",
+          "when": "azure-terraform-diagram.diagramOpen"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Azure Terraform Diagram",
+      "properties": {
+        "azureTerraformDiagram.theme": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "light", "dark"],
+          "description": "Diagram color theme (auto follows VS Code theme)"
+        },
+        "azureTerraformDiagram.showModuleDetails": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show detailed module information (creates, for_each)"
+        },
+        "azureTerraformDiagram.excludeResourceTypes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Resource types to exclude from diagram (e.g. azurerm_role_assignment)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "npx vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}
