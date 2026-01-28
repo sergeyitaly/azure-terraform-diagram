@@ -38,46 +38,60 @@ export interface NetworkInfo {
 }
 
 export class TerraformParser {
-    async parseWorkspace(workspacePath: string): Promise<TerraformResource[]> {
-        const tfFiles = this.findTerraformFiles(workspacePath);
+    /**
+     * Parse Terraform files in a workspace/folder
+     * @param workspacePath The path to scan for Terraform files
+     * @param recursive Whether to scan subdirectories (default: false for folder-specific generation)
+     */
+    async parseWorkspace(workspacePath: string, recursive: boolean = false): Promise<TerraformResource[]> {
+        const tfFiles = this.findTerraformFiles(workspacePath, recursive);
         const resources: TerraformResource[] = [];
-        
-        console.log(`Found ${tfFiles.length} Terraform files in ${workspacePath}`);
-        
+
+        console.log(`[TerraformParser] Scanning path: ${workspacePath} (recursive: ${recursive})`);
+        console.log(`[TerraformParser] Found ${tfFiles.length} Terraform files`);
+        tfFiles.forEach(f => console.log(`  - ${f}`));
+
         for (const file of tfFiles) {
             try {
                 const fileResources = await this.parseTerraformFile(file, workspacePath);
                 resources.push(...fileResources);
-                console.log(`Parsed ${fileResources.length} resources from ${path.relative(workspacePath, file)}`);
+                console.log(`[TerraformParser] Parsed ${fileResources.length} resources from ${path.relative(workspacePath, file)}`);
             } catch (error) {
                 console.error(`Error parsing file ${file}:`, error);
             }
         }
-        
+
         this.extractDependencies(resources);
-        this.extractTagsAndModuleInfo(resources); // NEW: Extract tags and module info
-        
-        console.log(`Total resources parsed: ${resources.length}`);
+        this.extractTagsAndModuleInfo(resources);
+
+        console.log(`[TerraformParser] Total resources parsed: ${resources.length}`);
         return resources;
     }
-    
-    private findTerraformFiles(dir: string): string[] {
+
+    /**
+     * Find Terraform files in a directory
+     * @param dir Directory to scan
+     * @param recursive Whether to scan subdirectories (default: false)
+     */
+    private findTerraformFiles(dir: string, recursive: boolean = false): string[] {
         const files: string[] = [];
-        
-        function scanDirectory(currentDir: string) {
+
+        function scanDirectory(currentDir: string, isRoot: boolean) {
             try {
                 const items = fs.readdirSync(currentDir, { withFileTypes: true });
-                
+
                 for (const item of items) {
                     const fullPath = path.join(currentDir, item.name);
-                    
+
                     if (item.isDirectory()) {
-                        if (!item.name.startsWith('.') && 
+                        // Only recurse into subdirectories if recursive is true OR if we're at root level
+                        // and the subdirectory looks like a Terraform module (contains .tf files)
+                        if (recursive && !item.name.startsWith('.') &&
                             !['node_modules', '.terraform', '.git', 'dist', 'build', 'target'].includes(item.name)) {
-                            scanDirectory(fullPath);
+                            scanDirectory(fullPath, false);
                         }
-                    } else if (item.isFile() && 
-                              (item.name.endsWith('.tf') || 
+                    } else if (item.isFile() &&
+                              (item.name.endsWith('.tf') ||
                                item.name.endsWith('.tf.json') ||
                                item.name.endsWith('.tfvars') ||
                                item.name === 'terraform.tfstate')) {
@@ -88,8 +102,8 @@ export class TerraformParser {
                 console.error(`Error scanning directory ${currentDir}:`, error);
             }
         }
-        
-        scanDirectory(dir);
+
+        scanDirectory(dir, true);
         return files;
     }
     

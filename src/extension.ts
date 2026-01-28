@@ -118,9 +118,10 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
     // Use target folder if provided, otherwise use workspace root
     const workspacePath = targetFolder || workspaceFolders[0].uri.fsPath;
 
-    // Parse Terraform files
+    // Parse Terraform files - use non-recursive scan for folder-specific generation
     const parser = new TerraformParser();
-    const resources = await parser.parseWorkspace(workspacePath);
+    const isSpecificFolder = targetFolder !== undefined;
+    const resources = await parser.parseWorkspace(workspacePath, !isSpecificFolder);
 
     if (resources.length === 0) {
         return; // No resources, skip generation
@@ -170,9 +171,11 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
         cancellable: true
     }, async (progress, token) => {
         progress.report({ message: 'Scanning for Terraform files...' });
-        
+
         const parser = new TerraformParser();
-        const resources = await parser.parseWorkspace(initialWorkspacePath);
+        // Use non-recursive scan when a specific folder is targeted
+        const isSpecificFolder = targetFolder !== undefined;
+        const resources = await parser.parseWorkspace(initialWorkspacePath, !isSpecificFolder);
         
         if (token.isCancellationRequested) {
             return null;
