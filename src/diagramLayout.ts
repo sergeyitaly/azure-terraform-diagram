@@ -269,8 +269,8 @@ export class DiagramLayout {
 
                 const zoneResources = resourcesByZone.get(zone) || [];
                 const resourcesPerColumn = Math.max(Math.ceil(Math.sqrt(zoneResources.length)), 1);
-                const resourceWidth = options.compactMode ? 100 : 120;
-                const resourceHeight = options.compactMode ? 42 : 48;
+                const resourceWidth = options.compactMode ? 140 : 180;
+                const resourceHeight = options.compactMode ? 52 : 64;
                 const columnSpacing = 15;
                 const rowSpacing = 8;
                 const numRows = Math.ceil(zoneResources.length / resourcesPerColumn);
@@ -434,8 +434,8 @@ export class DiagramLayout {
                     return orderA - orderB;
                 });
 
-            const resourceWidth = options.compactMode ? 100 : 120;
-            const resourceHeight = options.compactMode ? 42 : 48;
+            const resourceWidth = options.compactMode ? 140 : 180;
+            const resourceHeight = options.compactMode ? 52 : 64;
             const colSpacing = 12;
             const rowSpacing = 6;
             const typeGroupSpacing = 14;
@@ -722,8 +722,8 @@ export class DiagramLayout {
             const layerX = padding + layerIndex * layerWidth;
 
             const resources = layer.resources;
-            const resourceWidth = options.compactMode ? 100 : 120;
-            const resourceHeight = options.compactMode ? 42 : 48;
+            const resourceWidth = options.compactMode ? 140 : 180;
+            const resourceHeight = options.compactMode ? 52 : 64;
             const spacing = 8;
             const totalHeight = resources.length * (resourceHeight + spacing) - spacing;
             const startY = centerY - totalHeight / 2;
@@ -848,8 +848,8 @@ export class DiagramLayout {
             
             const zoneResources = resourcesByZone.get(zone) || [];
             const resourcesPerRow = Math.ceil(Math.sqrt(zoneResources.length));
-            const resourceWidth = options.compactMode ? 100 : 120;
-            const resourceHeight = options.compactMode ? 42 : 48;
+            const resourceWidth = options.compactMode ? 140 : 180;
+            const resourceHeight = options.compactMode ? 52 : 64;
             const rowSpacing = 6;
             const colSpacing = 12;
             
@@ -1105,8 +1105,8 @@ export class DiagramLayout {
     private static applyStyling(nodes: DiagramNode[], options: DiagramOptions): DiagramNode[] {
         return nodes.map(node => {
             if (!node.isGroupContainer && node.type !== 'zone' && node.type !== 'layer' && node.type !== 'zone-container' && node.type !== 'zone-title') {
-                node.width = options.compactMode ? 100 : 120;
-                node.height = options.compactMode ? 42 : 48;
+                node.width = options.compactMode ? 140 : 180;
+                node.height = options.compactMode ? 52 : 64;
                 
                 if (!node.displayName && node.name) {
                     node.displayName = this.getDisplayName({

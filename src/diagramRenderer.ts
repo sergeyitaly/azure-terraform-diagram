@@ -55,242 +55,440 @@ export class DiagramRenderer {
     }
 
     /**
-     * Get resource detail string (IP, SKU, size, etc.)
+     * Get resource detail lines (IP, SKU, size, etc.) - returns array for multi-line display
      */
-    private getResourceDetail(node: DiagramNode): string {
+    private getResourceDetails(node: DiagramNode): string[] {
         const resource = this.resourceMap.get(node.id);
-        if (!resource) return '';
+        if (!resource) return [];
 
         const ni = resource.networkInfo || {};
         const attr = resource.attributes || {};
+        const details: string[] = [];
+
+        // Helper to add non-empty values
+        const add = (value: string | undefined | null) => {
+            if (value && value.trim()) details.push(value.trim());
+        };
+
+        // Helper to extract reference name
+        const extractRef = (value: any): string => {
+            if (typeof value === 'string') {
+                const match = value.match(/azurerm_\w+\.([^.]+)/);
+                return match ? match[1] : value;
+            }
+            return String(value);
+        };
+
+        // Resource Group
+        if (node.type === 'azurerm_resource_group') {
+            add(attr.location);
+            return details;
+        }
 
         // VNet: address space
         if (node.type === 'azurerm_virtual_network') {
             if (attr.address_space) {
                 const space = Array.isArray(attr.address_space) ? attr.address_space.join(', ') : attr.address_space;
-                return space;
+                add(space);
             }
+            add(attr.location);
+            if (attr.dns_servers && Array.isArray(attr.dns_servers) && attr.dns_servers.length > 0) {
+                add(`DNS: ${attr.dns_servers.join(', ')}`);
+            }
+            return details;
         }
 
         // Subnet: CIDR prefix
         if (node.type === 'azurerm_subnet') {
-            if (ni.addressPrefix) return ni.addressPrefix.split(' in ')[0];
             if (attr.address_prefixes) {
                 const p = Array.isArray(attr.address_prefixes) ? attr.address_prefixes.join(', ') : attr.address_prefixes;
-                return p;
+                add(p);
+            } else if (attr.address_prefix) {
+                add(attr.address_prefix);
+            } else if (ni.addressPrefix) {
+                add(ni.addressPrefix.split(' in ')[0]);
             }
-            if (attr.address_prefix) return attr.address_prefix;
+            if (attr.service_endpoints && Array.isArray(attr.service_endpoints)) {
+                add(`Endpoints: ${attr.service_endpoints.length}`);
+            }
+            if (attr.delegation) {
+                add('Delegated');
+            }
+            return details;
         }
 
         // NIC: private IP + subnet ref
         if (node.type === 'azurerm_network_interface') {
-            const parts: string[] = [];
-            if (ni.privateIpAddress) parts.push(ni.privateIpAddress);
-            if (ni.subnetAddressPrefix) parts.push(ni.subnetAddressPrefix);
-            return parts.join(' | ') || '';
+            if (ni.privateIpAddress) add(`IP: ${ni.privateIpAddress}`);
+            if (attr.ip_configuration) {
+                const ipConfig = Array.isArray(attr.ip_configuration) ? attr.ip_configuration[0] : attr.ip_configuration;
+                if (ipConfig) {
+                    if (ipConfig.private_ip_address) add(`IP: ${ipConfig.private_ip_address}`);
+                    if (ipConfig.private_ip_address_allocation) add(ipConfig.private_ip_address_allocation);
+                }
+            }
+            if (attr.enable_accelerated_networking) add('Accelerated');
+            return details;
         }
 
         // Public IP
         if (node.type === 'azurerm_public_ip') {
-            const parts: string[] = [];
-            if (ni.ipAddress) parts.push(ni.ipAddress);
-            if (ni.publicIpAddress) parts.push(ni.publicIpAddress);
-            if (!parts.length && attr.allocation_method) parts.push(attr.allocation_method);
-            if (attr.sku) parts.push(`SKU: ${attr.sku}`);
-            return parts.join(' ') || '';
+            if (attr.allocation_method) add(attr.allocation_method);
+            if (attr.sku) add(`SKU: ${attr.sku}`);
+            if (attr.sku_tier) add(`Tier: ${attr.sku_tier}`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            if (attr.domain_name_label) add(`DNS: ${attr.domain_name_label}`);
+            return details;
         }
 
-        // NSG: rule count
+        // NSG: rule count + key rules
         if (node.type === 'azurerm_network_security_group') {
             if (resource.securityRules && resource.securityRules.length > 0) {
-                return resource.securityRules.length + ' rules';
+                add(`${resource.securityRules.length} security rules`);
+                // Show first few rule names
+                const ruleNames = resource.securityRules.slice(0, 2).map(r => r.name).join(', ');
+                if (ruleNames) add(ruleNames);
             }
+            return details;
         }
 
-        // VM: size
-        if (node.type.includes('virtual_machine')) {
+        // NSG Rule
+        if (node.type === 'azurerm_network_security_rule') {
+            if (attr.direction) add(attr.direction);
+            if (attr.access) add(attr.access);
+            if (attr.protocol) add(`Protocol: ${attr.protocol}`);
+            if (attr.destination_port_range) add(`Port: ${attr.destination_port_range}`);
+            if (attr.priority) add(`Priority: ${attr.priority}`);
+            return details;
+        }
+
+        // VM: size + OS
+        if (node.type.includes('virtual_machine') || node.type.includes('linux_virtual_machine') || node.type.includes('windows_virtual_machine')) {
             const size = attr.size || attr.vm_size;
-            if (size) return size;
+            if (size) add(size);
+            if (attr.admin_username) add(`User: ${attr.admin_username}`);
+            if (attr.source_image_reference) {
+                const img = attr.source_image_reference;
+                if (typeof img === 'object') {
+                    add(`${img.publisher || ''}/${img.offer || ''}`);
+                    if (img.sku) add(`SKU: ${img.sku}`);
+                }
+            }
+            if (attr.os_disk) {
+                const disk = attr.os_disk;
+                if (typeof disk === 'object') {
+                    if (disk.storage_account_type) add(`Disk: ${disk.storage_account_type}`);
+                    if (disk.disk_size_gb) add(`${disk.disk_size_gb}GB`);
+                }
+            }
+            if (attr.zone) add(`Zone: ${attr.zone}`);
+            return details;
         }
 
-        // Storage account: tier + replication
+        // Storage account
         if (node.type === 'azurerm_storage_account') {
-            const parts: string[] = [];
-            if (attr.account_tier) parts.push(attr.account_tier);
-            if (attr.account_replication_type) parts.push(attr.account_replication_type);
-            return parts.join('_') || '';
+            if (attr.account_tier && attr.account_replication_type) {
+                add(`${attr.account_tier}_${attr.account_replication_type}`);
+            }
+            if (attr.account_kind) add(attr.account_kind);
+            if (attr.access_tier) add(`Access: ${attr.access_tier}`);
+            if (attr.min_tls_version) add(`TLS: ${attr.min_tls_version}`);
+            if (attr.enable_https_traffic_only) add('HTTPS only');
+            return details;
         }
 
-        // SQL Server / DB
-        if (node.type === 'azurerm_sql_server' || node.type === 'azurerm_mssql_server') {
-            if (attr.version) return 'v' + attr.version;
+        // Storage container
+        if (node.type === 'azurerm_storage_container') {
+            if (attr.container_access_type) add(`Access: ${attr.container_access_type}`);
+            return details;
         }
+
+        // SQL Server
+        if (node.type === 'azurerm_sql_server' || node.type === 'azurerm_mssql_server') {
+            if (attr.version) add(`v${attr.version}`);
+            if (attr.administrator_login) add(`Admin: ${attr.administrator_login}`);
+            if (attr.minimum_tls_version) add(`TLS: ${attr.minimum_tls_version}`);
+            if (attr.public_network_access_enabled === false) add('Private');
+            return details;
+        }
+
+        // SQL Database
         if (node.type === 'azurerm_sql_database' || node.type === 'azurerm_mssql_database') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.max_size_gb) parts.push(attr.max_size_gb + 'GB');
-            return parts.join(' | ') || '';
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.max_size_gb) add(`${attr.max_size_gb}GB`);
+            if (attr.collation) add(attr.collation);
+            if (attr.zone_redundant) add('Zone redundant');
+            if (attr.read_scale) add('Read scale');
+            return details;
+        }
+
+        // PostgreSQL / MySQL
+        if (node.type.includes('postgresql') || node.type.includes('mysql')) {
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.version) add(`v${attr.version}`);
+            if (attr.storage_mb) add(`${Math.round(attr.storage_mb / 1024)}GB`);
+            if (attr.administrator_login) add(`Admin: ${attr.administrator_login}`);
+            if (attr.ssl_enforcement_enabled) add('SSL enforced');
+            return details;
         }
 
         // AKS
         if (node.type === 'azurerm_kubernetes_cluster') {
-            const parts: string[] = [];
-            if (attr.kubernetes_version) parts.push('k8s ' + attr.kubernetes_version);
-            if (attr.sku_tier) parts.push(attr.sku_tier);
-            if (ni.addressPrefix) parts.push(ni.addressPrefix);
-            return parts.join(' | ') || '';
-        }
-
-        // App Service / Function App
-        if (node.type === 'azurerm_app_service' || node.type === 'azurerm_linux_web_app' || node.type === 'azurerm_windows_web_app') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.https_only) parts.push('HTTPS');
-            return parts.join(' | ') || '';
-        }
-
-        if (node.type === 'azurerm_app_service_plan' || node.type === 'azurerm_service_plan') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.os_type) parts.push(attr.os_type);
-            if (attr.sku) {
-                const sku = attr.sku;
-                if (typeof sku === 'object') {
-                    if (sku.tier) parts.push(sku.tier);
-                    if (sku.size) parts.push(sku.size);
+            if (attr.kubernetes_version) add(`k8s ${attr.kubernetes_version}`);
+            if (attr.sku_tier) add(attr.sku_tier);
+            if (attr.default_node_pool) {
+                const pool = attr.default_node_pool;
+                if (typeof pool === 'object') {
+                    if (pool.vm_size) add(pool.vm_size);
+                    if (pool.node_count) add(`Nodes: ${pool.node_count}`);
+                    if (pool.min_count && pool.max_count) add(`Scale: ${pool.min_count}-${pool.max_count}`);
                 }
             }
-            return parts.join(' | ') || '';
+            if (attr.network_profile) {
+                const net = attr.network_profile;
+                if (typeof net === 'object' && net.network_plugin) {
+                    add(`Network: ${net.network_plugin}`);
+                }
+            }
+            return details;
+        }
+
+        // App Service / Web App
+        if (node.type === 'azurerm_app_service' || node.type === 'azurerm_linux_web_app' || node.type === 'azurerm_windows_web_app') {
+            if (attr.https_only) add('HTTPS only');
+            if (attr.site_config) {
+                const cfg = attr.site_config;
+                if (typeof cfg === 'object') {
+                    if (cfg.always_on) add('Always On');
+                    if (cfg.http2_enabled) add('HTTP/2');
+                    if (cfg.minimum_tls_version) add(`TLS ${cfg.minimum_tls_version}`);
+                    if (cfg.ftps_state) add(`FTPS: ${cfg.ftps_state}`);
+                }
+            }
+            return details;
+        }
+
+        // Service Plan
+        if (node.type === 'azurerm_app_service_plan' || node.type === 'azurerm_service_plan') {
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.os_type) add(attr.os_type);
+            if (attr.worker_count) add(`Workers: ${attr.worker_count}`);
+            if (attr.zone_balancing_enabled) add('Zone balanced');
+            if (attr.sku && typeof attr.sku === 'object') {
+                if (attr.sku.tier) add(attr.sku.tier);
+                if (attr.sku.size) add(attr.sku.size);
+            }
+            return details;
         }
 
         // Function App
         if (node.type === 'azurerm_function_app' || node.type === 'azurerm_linux_function_app' || node.type === 'azurerm_windows_function_app') {
-            const parts: string[] = [];
-            if (attr.os_type) parts.push(attr.os_type);
-            return parts.join(' | ') || '';
-        }
-
-        // Firewall / App Gateway / NAT Gateway
-        if (node.type === 'azurerm_firewall') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.sku_tier) parts.push(attr.sku_tier);
-            return parts.join(' ') || '';
-        }
-
-        if (node.type === 'azurerm_application_gateway') {
-            if (attr.sku) {
-                const sku = attr.sku;
-                if (typeof sku === 'object') {
-                    const parts: string[] = [];
-                    if (sku.name) parts.push(sku.name);
-                    if (sku.tier) parts.push(sku.tier);
-                    if (sku.capacity) parts.push(`cap:${sku.capacity}`);
-                    return parts.join(' ') || '';
+            if (attr.os_type) add(attr.os_type);
+            if (attr.https_only) add('HTTPS only');
+            if (attr.site_config) {
+                const cfg = attr.site_config;
+                if (typeof cfg === 'object') {
+                    if (cfg.application_stack) {
+                        const stack = cfg.application_stack;
+                        if (typeof stack === 'object') {
+                            const runtime = stack.node_version || stack.python_version || stack.dotnet_version || stack.java_version;
+                            if (runtime) add(`Runtime: ${runtime}`);
+                        }
+                    }
                 }
-                return String(sku);
             }
+            return details;
         }
 
+        // Firewall
+        if (node.type === 'azurerm_firewall') {
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.sku_tier) add(attr.sku_tier);
+            if (attr.threat_intel_mode) add(`Threat Intel: ${attr.threat_intel_mode}`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            return details;
+        }
+
+        // Application Gateway
+        if (node.type === 'azurerm_application_gateway') {
+            if (attr.sku && typeof attr.sku === 'object') {
+                if (attr.sku.name) add(attr.sku.name);
+                if (attr.sku.tier) add(attr.sku.tier);
+                if (attr.sku.capacity) add(`Capacity: ${attr.sku.capacity}`);
+            }
+            if (attr.enable_http2) add('HTTP/2');
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            return details;
+        }
+
+        // NAT Gateway
         if (node.type === 'azurerm_nat_gateway') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.idle_timeout_in_minutes) parts.push(`${attr.idle_timeout_in_minutes}m timeout`);
-            return parts.join(' | ') || '';
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.idle_timeout_in_minutes) add(`Timeout: ${attr.idle_timeout_in_minutes}m`);
+            if (attr.zones && Array.isArray(attr.zones)) add(`Zones: ${attr.zones.join(',')}`);
+            return details;
         }
 
         // Load Balancer
         if (node.type === 'azurerm_lb') {
-            const parts: string[] = [];
-            if (attr.sku) parts.push(attr.sku);
-            if (attr.sku_name) parts.push(attr.sku_name);
-            return parts.join(' ') || '';
+            if (attr.sku) add(attr.sku);
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.sku_tier) add(attr.sku_tier);
+            return details;
         }
 
         // Key Vault
         if (node.type === 'azurerm_key_vault') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.soft_delete_retention_days) parts.push(`${attr.soft_delete_retention_days}d retention`);
-            return parts.join(' | ') || '';
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.soft_delete_retention_days) add(`Retention: ${attr.soft_delete_retention_days}d`);
+            if (attr.purge_protection_enabled) add('Purge protected');
+            if (attr.enable_rbac_authorization) add('RBAC enabled');
+            return details;
         }
 
         // Redis Cache
         if (node.type === 'azurerm_redis_cache') {
-            const parts: string[] = [];
-            if (attr.sku_name) parts.push(attr.sku_name);
-            if (attr.family) parts.push(attr.family);
-            if (attr.capacity) parts.push(`cap:${attr.capacity}`);
-            return parts.join(' ') || '';
+            if (attr.sku_name) add(attr.sku_name);
+            if (attr.family && attr.capacity) add(`${attr.family}${attr.capacity}`);
+            if (attr.minimum_tls_version) add(`TLS ${attr.minimum_tls_version}`);
+            if (attr.enable_non_ssl_port === false) add('SSL only');
+            return details;
         }
 
         // Cosmos DB
         if (node.type === 'azurerm_cosmosdb_account') {
-            const parts: string[] = [];
-            if (attr.offer_type) parts.push(attr.offer_type);
-            if (attr.kind) parts.push(attr.kind);
-            return parts.join(' | ') || '';
+            if (attr.offer_type) add(attr.offer_type);
+            if (attr.kind) add(attr.kind);
+            if (attr.consistency_policy) {
+                const cp = attr.consistency_policy;
+                if (typeof cp === 'object' && cp.consistency_level) {
+                    add(`Consistency: ${cp.consistency_level}`);
+                }
+            }
+            if (attr.is_virtual_network_filter_enabled) add('VNet filtered');
+            return details;
         }
 
-        // Container group: ports
+        // Container group
         if (node.type === 'azurerm_container_group') {
-            const parts: string[] = [];
-            if (ni.ipAddress) parts.push(ni.ipAddress);
-            if (ni.ports && ni.ports.length) parts.push('ports: ' + ni.ports.join(','));
-            if (attr.os_type) parts.push(attr.os_type);
-            return parts.join(' ') || '';
+            if (attr.os_type) add(attr.os_type);
+            if (attr.ip_address_type) add(attr.ip_address_type);
+            if (attr.restart_policy) add(`Restart: ${attr.restart_policy}`);
+            if (ni.ports && ni.ports.length) add(`Ports: ${ni.ports.join(',')}`);
+            return details;
         }
 
         // Container Registry
         if (node.type === 'azurerm_container_registry') {
-            const parts: string[] = [];
-            if (attr.sku) parts.push(attr.sku);
-            if (attr.admin_enabled) parts.push('admin');
-            return parts.join(' | ') || '';
+            if (attr.sku) add(attr.sku);
+            if (attr.admin_enabled) add('Admin enabled');
+            if (attr.public_network_access_enabled === false) add('Private');
+            if (attr.zone_redundancy_enabled) add('Zone redundant');
+            return details;
         }
 
         // Log Analytics
         if (node.type === 'azurerm_log_analytics_workspace') {
-            const parts: string[] = [];
-            if (attr.sku) parts.push(attr.sku);
-            if (attr.retention_in_days) parts.push(`${attr.retention_in_days}d`);
-            return parts.join(' | ') || '';
+            if (attr.sku) add(attr.sku);
+            if (attr.retention_in_days) add(`Retention: ${attr.retention_in_days}d`);
+            if (attr.daily_quota_gb) add(`Quota: ${attr.daily_quota_gb}GB/day`);
+            return details;
         }
 
         // Application Insights
         if (node.type === 'azurerm_application_insights') {
-            const parts: string[] = [];
-            if (attr.application_type) parts.push(attr.application_type);
-            if (attr.retention_in_days) parts.push(`${attr.retention_in_days}d`);
-            return parts.join(' | ') || '';
+            if (attr.application_type) add(attr.application_type);
+            if (attr.retention_in_days) add(`Retention: ${attr.retention_in_days}d`);
+            if (attr.sampling_percentage) add(`Sampling: ${attr.sampling_percentage}%`);
+            return details;
         }
 
         // Route table
         if (node.type === 'azurerm_route_table') {
-            return 'UDR';
+            add('UDR');
+            if (attr.disable_bgp_route_propagation) add('BGP disabled');
+            return details;
+        }
+
+        // Route
+        if (node.type === 'azurerm_route') {
+            if (attr.address_prefix) add(attr.address_prefix);
+            if (attr.next_hop_type) add(`→ ${attr.next_hop_type}`);
+            if (attr.next_hop_in_ip_address) add(attr.next_hop_in_ip_address);
+            return details;
         }
 
         // VPN Gateway
         if (node.type === 'azurerm_virtual_network_gateway') {
-            const parts: string[] = [];
-            if (attr.type) parts.push(attr.type);
-            if (attr.sku) parts.push(attr.sku);
-            return parts.join(' | ') || '';
+            if (attr.type) add(attr.type);
+            if (attr.sku) add(attr.sku);
+            if (attr.vpn_type) add(attr.vpn_type);
+            if (attr.active_active) add('Active-Active');
+            return details;
         }
 
         // Express Route
         if (node.type === 'azurerm_express_route_circuit') {
-            const parts: string[] = [];
-            if (attr.service_provider_name) parts.push(attr.service_provider_name);
-            if (attr.bandwidth_in_mbps) parts.push(`${attr.bandwidth_in_mbps}Mbps`);
-            return parts.join(' | ') || '';
+            if (attr.service_provider_name) add(attr.service_provider_name);
+            if (attr.bandwidth_in_mbps) add(`${attr.bandwidth_in_mbps}Mbps`);
+            if (attr.peering_location) add(attr.peering_location);
+            return details;
         }
 
-        // Generic: check for sku, location
-        if (attr.sku_name) return attr.sku_name;
-        if (attr.sku && typeof attr.sku === 'string') return attr.sku;
+        // Bastion
+        if (node.type === 'azurerm_bastion_host') {
+            if (attr.sku) add(attr.sku);
+            if (attr.copy_paste_enabled) add('Copy/Paste');
+            if (attr.file_copy_enabled) add('File copy');
+            if (attr.tunneling_enabled) add('Tunneling');
+            return details;
+        }
 
-        return '';
+        // Private Endpoint
+        if (node.type === 'azurerm_private_endpoint') {
+            if (attr.private_service_connection) {
+                const psc = attr.private_service_connection;
+                if (typeof psc === 'object') {
+                    if (psc.subresource_names && Array.isArray(psc.subresource_names)) {
+                        add(psc.subresource_names.join(', '));
+                    }
+                }
+            }
+            return details;
+        }
+
+        // Private DNS Zone
+        if (node.type === 'azurerm_private_dns_zone') {
+            // Just show the zone name is enough
+            return details;
+        }
+
+        // Managed Identity
+        if (node.type === 'azurerm_user_assigned_identity') {
+            add(attr.location || '');
+            return details;
+        }
+
+        // Role Assignment
+        if (node.type === 'azurerm_role_assignment') {
+            if (attr.role_definition_name) add(attr.role_definition_name);
+            return details;
+        }
+
+        // Generic fallback: extract common attributes
+        if (attr.sku_name) add(attr.sku_name);
+        else if (attr.sku && typeof attr.sku === 'string') add(attr.sku);
+        if (attr.location && details.length === 0) add(attr.location);
+
+        return details;
+    }
+
+    /**
+     * Get resource detail string (single line, for backwards compat)
+     */
+    private getResourceDetail(node: DiagramNode): string {
+        const details = this.getResourceDetails(node);
+        return details.slice(0, 2).join(' | ');
     }
 
     /**
@@ -398,7 +596,7 @@ export class DiagramRenderer {
         const resourceInfo = AzureIconMapper.getResourceInfo(node.type);
         const borderColor = CATEGORY_COLORS[resourceInfo.category] || CATEGORY_COLORS['General'];
         const displayName = node.displayName || node.name;
-        const detail = this.getResourceDetail(node);
+        const details = this.getResourceDetails(node);
 
         // Try to load icon as base64
         let iconContent = '';
@@ -408,24 +606,29 @@ export class DiagramRenderer {
                 const iconData = fs.readFileSync(iconPath);
                 const base64 = iconData.toString('base64');
                 const mimeType = iconPath.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
-                iconContent = `<image x="${x + 4}" y="${y + (node.height - 24) / 2}" width="24" height="24"
+                iconContent = `<image x="${x + 4}" y="${y + (node.height - 28) / 2}" width="28" height="28"
                        xlink:href="data:${mimeType};base64,${base64}"/>`;
             }
         } catch (e) {
             // Icon not found, skip it
         }
 
-        // Calculate text positions
-        const textX = x + 32;
-        const hasDetail = detail.length > 0;
-        const nameY = hasDetail ? y + node.height / 2 - 2 : y + node.height / 2 + 3;
-        const detailY = y + node.height / 2 + 9;
+        // Calculate text positions - support up to 3 lines of details
+        const textX = x + 36;
+        const maxTextWidth = node.width - 42;
+        const charLimit = Math.floor(maxTextWidth / 5); // approx 5px per char at 8px font
 
-        let detailElement = '';
-        if (hasDetail) {
-            detailElement = `
+        // Name at top, details below
+        const nameY = y + 14;
+        let detailElements = '';
+
+        // Show up to 3 detail lines
+        const maxDetails = Math.min(details.length, 3);
+        for (let i = 0; i < maxDetails; i++) {
+            const detailY = y + 26 + (i * 11);
+            detailElements += `
     <text x="${textX}" y="${detailY}" class="node-detail">
-      ${this.escapeXml(this.truncateText(detail, 16))}
+      ${this.escapeXml(this.truncateText(details[i], charLimit))}
     </text>`;
         }
 
@@ -437,8 +640,8 @@ export class DiagramRenderer {
           rx="2" ry="2" fill="${borderColor}"/>
     ${iconContent}
     <text x="${textX}" y="${nameY}" class="node-text-bold">
-      ${this.escapeXml(this.truncateText(displayName, 12))}
-    </text>${detailElement}
+      ${this.escapeXml(this.truncateText(displayName, charLimit))}
+    </text>${detailElements}
   </g>`;
     }
 
