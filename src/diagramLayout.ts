@@ -57,7 +57,7 @@ export interface DiagramOptions {
     hideImplicitDependencies?: boolean;
     hideCrossEnvironment?: boolean;
     
-    groupBy?: 'zone' | 'function' | 'layer' | 'resourceGroup' | 'none';
+    groupBy?: 'zone' | 'function' | 'layer' | 'resourceGroup' | 'module' | 'none';
     
     theme?: 'light' | 'dark' | 'blueprint';
     showGrid?: boolean;
@@ -177,6 +177,18 @@ export class DiagramLayout {
             nodes = this.applyStyling(nodes, mergedOptions);
             this.ensureWithinBounds(nodes, mergedOptions);
             return nodes;
+        }
+
+        // If groupBy is module and there are modules, use the module layout
+        if (mergedOptions.groupBy === 'module') {
+            const hasModules = filteredResources.some(r => r.module);
+            if (hasModules) {
+                let nodes = this.createModuleLayout(filteredResources, dependencies, mergedOptions);
+                nodes = this.applyStyling(nodes, mergedOptions);
+                this.ensureWithinBounds(nodes, mergedOptions);
+                return nodes;
+            }
+            // Fall back to resource group layout if no modules exist
         }
 
         const layoutMethod = mergedOptions.layout || 'flow';
@@ -1234,6 +1246,191 @@ export class DiagramLayout {
     }
 
     /**
+     * Create layout grouped by Terraform modules
+     * Resources are organized into module containers, with resources inside grouped by type
+     */
+    private static createModuleLayout(
+        resources: TerraformResource[],
+        dependencies: Map<string, string[]>,
+        options: DiagramOptions
+    ): DiagramNode[] {
+        const nodes: DiagramNode[] = [];
+        const padding = options.padding || this.DEFAULT_PADDING;
+        const availableWidth = (options.width || this.DEFAULT_WIDTH) - 2 * padding;
+
+        const resourceWidth = options.compactMode ? 140 : 180;
+        const resourceHeight = options.compactMode ? 52 : 64;
+        const colSpacing = 12;
+        const rowSpacing = 8;
+        const maxPerRow = 4;
+        const moduleGap = 25;
+        const headerHeight = 32;
+        const containerPadding = 15;
+
+        // Group resources by module
+        const resourcesByModule = this.groupResourcesByModule(resources);
+
+        // Sort modules: put 'root' first, then alphabetically
+        const moduleNames = Array.from(resourcesByModule.keys()).sort((a, b) => {
+            if (a === 'root') return -1;
+            if (b === 'root') return 1;
+            return a.localeCompare(b);
+        });
+
+        let currentY = padding;
+
+        moduleNames.forEach((moduleName) => {
+            const moduleResources = resourcesByModule.get(moduleName) || [];
+            if (moduleResources.length === 0) return;
+
+            // Group resources by type within this module
+            const resourcesByType = new Map<string, TerraformResource[]>();
+            moduleResources.forEach(resource => {
+                if (!resourcesByType.has(resource.type)) {
+                    resourcesByType.set(resource.type, []);
+                }
+                resourcesByType.get(resource.type)!.push(resource);
+            });
+
+            // Calculate container dimensions
+            let totalRows = 0;
+            let maxRowWidth = 0;
+            resourcesByType.forEach((typeResources) => {
+                const rows = Math.ceil(typeResources.length / maxPerRow);
+                totalRows += rows;
+                const itemsInRow = Math.min(typeResources.length, maxPerRow);
+                const rowWidth = itemsInRow * resourceWidth + (itemsInRow - 1) * colSpacing;
+                maxRowWidth = Math.max(maxRowWidth, rowWidth);
+            });
+
+            const containerWidth = Math.max(maxRowWidth + containerPadding * 2, 250);
+            const containerHeight = headerHeight + totalRows * (resourceHeight + rowSpacing) + containerPadding;
+            const containerX = padding + (availableWidth - containerWidth) / 2;
+
+            // Create module container
+            const containerId = `module_container_${moduleName}`;
+            const displayName = moduleName === 'root' ? 'Root Module' : `Module: ${moduleName}`;
+            const moduleContainer: DiagramNode = {
+                id: containerId,
+                type: 'module-container',
+                name: moduleName,
+                x: containerX,
+                y: currentY,
+                width: containerWidth,
+                height: containerHeight,
+                connections: [],
+                category: 'General',
+                level: 0,
+                isGroupContainer: true,
+                children: [],
+                color: moduleName === 'root' ? '#F0F0F0' : '#E8F4E8',
+                zone: moduleName,
+                module: moduleName,
+                displayName: displayName
+            };
+            nodes.push(moduleContainer);
+
+            let nodeY = currentY + headerHeight;
+
+            // Sort types to show important ones first
+            const sortedTypes = Array.from(resourcesByType.keys()).sort((a, b) => {
+                const order: Record<string, number> = {
+                    'azurerm_resource_group': 1,
+                    'azurerm_virtual_network': 2,
+                    'azurerm_subnet': 3,
+                    'azurerm_network_security_group': 4,
+                    'azurerm_public_ip': 5,
+                    'azurerm_network_interface': 6,
+                    'azurerm_linux_virtual_machine': 10,
+                    'azurerm_windows_virtual_machine': 10,
+                    'azurerm_virtual_machine': 10,
+                    'azurerm_storage_account': 20,
+                    'azurerm_key_vault': 30
+                };
+                const orderA = order[a] || 100;
+                const orderB = order[b] || 100;
+                return orderA - orderB;
+            });
+
+            sortedTypes.forEach((type) => {
+                const typeResources = resourcesByType.get(type) || [];
+                const totalItems = typeResources.length;
+                const rowCount = Math.ceil(totalItems / maxPerRow);
+
+                for (let row = 0; row < rowCount; row++) {
+                    const rowStart = row * maxPerRow;
+                    const rowEnd = Math.min(rowStart + maxPerRow, totalItems);
+                    const itemsInRow = rowEnd - rowStart;
+
+                    // Center this row within the container
+                    const totalRowWidth = itemsInRow * resourceWidth + (itemsInRow - 1) * colSpacing;
+                    const rowStartX = containerX + (containerWidth - totalRowWidth) / 2;
+
+                    for (let col = 0; col < itemsInRow; col++) {
+                        const resource = typeResources[rowStart + col];
+                        const nodeId = `${resource.type}_${resource.name}`;
+                        const resourceInfo = AzureIconMapper.getResourceInfo(resource.type);
+
+                        const nodeX = rowStartX + col * (resourceWidth + colSpacing);
+                        const actualY = nodeY + row * (resourceHeight + rowSpacing);
+
+                        const node: DiagramNode = {
+                            id: nodeId,
+                            type: resource.type,
+                            name: resource.name,
+                            x: nodeX,
+                            y: actualY,
+                            width: resourceWidth,
+                            height: resourceHeight,
+                            connections: dependencies.get(nodeId) || [],
+                            networkInfo: resource.networkInfo,
+                            securityRules: resource.securityRules,
+                            category: resourceInfo.category,
+                            tags: resource.tags,
+                            environment: this.extractEnvironment(resource),
+                            module: resource.module,
+                            level: 1,
+                            parentGroup: containerId,
+                            color: this.MICROSOFT_COLORS[resourceInfo.category],
+                            zone: moduleName,
+                            icon: resourceInfo.icon,
+                            displayName: this.getDisplayName(resource)
+                        };
+                        nodes.push(node);
+                        moduleContainer.children!.push(nodeId);
+                    }
+                }
+
+                nodeY += rowCount * (resourceHeight + rowSpacing);
+            });
+
+            // Update container height based on actual content
+            moduleContainer.height = nodeY - currentY + containerPadding;
+
+            currentY = nodeY + moduleGap;
+        });
+
+        return nodes;
+    }
+
+    /**
+     * Group resources by their Terraform module
+     */
+    private static groupResourcesByModule(resources: TerraformResource[]): Map<string, TerraformResource[]> {
+        const map = new Map<string, TerraformResource[]>();
+
+        resources.forEach(resource => {
+            const moduleName = resource.module || 'root';
+            if (!map.has(moduleName)) {
+                map.set(moduleName, []);
+            }
+            map.get(moduleName)!.push(resource);
+        });
+
+        return map;
+    }
+
+    /**
      * Extract resource group name from a resource
      */
     private static extractResourceGroupName(resource: TerraformResource): string {
@@ -1375,7 +1572,7 @@ export class DiagramLayout {
     
     private static applyStyling(nodes: DiagramNode[], options: DiagramOptions): DiagramNode[] {
         return nodes.map(node => {
-            if (!node.isGroupContainer && node.type !== 'zone' && node.type !== 'layer' && node.type !== 'zone-container' && node.type !== 'zone-title') {
+            if (!node.isGroupContainer && node.type !== 'zone' && node.type !== 'layer' && node.type !== 'zone-container' && node.type !== 'zone-title' && node.type !== 'module-container' && node.type !== 'resource-group-container') {
                 node.width = options.compactMode ? 140 : 180;
                 node.height = options.compactMode ? 52 : 64;
                 
@@ -1569,8 +1766,9 @@ export class DiagramLayout {
         nodes.forEach(node => nodeMap.set(node.id, node));
         
         nodes.forEach(sourceNode => {
-            if (sourceNode.type === 'zone' || sourceNode.type === 'layer' || 
-                sourceNode.type === 'zone-container' || sourceNode.type === 'zone-title') {
+            if (sourceNode.type === 'zone' || sourceNode.type === 'layer' ||
+                sourceNode.type === 'zone-container' || sourceNode.type === 'zone-title' ||
+                sourceNode.type === 'module-container' || sourceNode.type === 'resource-group-container') {
                 return;
             }
             

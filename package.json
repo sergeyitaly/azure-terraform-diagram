@@ -2,7 +2,7 @@
   "name": "azure-terraform-diagram",
   "displayName": "Azure Terraform Diagram",
   "description": "Generate Microsoft Azure-style infrastructure diagrams from Terraform projects",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "publisher": "SerhiiVoinolovych",
   "icon": "media/icon.png",
   "repository": {

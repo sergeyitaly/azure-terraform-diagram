@@ -71,19 +71,21 @@ export class TerraformParser {
     /**
      * Find Terraform files in a directory
      * @param dir Directory to scan
-     * @param recursive Whether to scan subdirectories (default: false)
+     * @param recursive Whether to scan all subdirectories
+     * For Terraform projects, we ALWAYS scan the 'modules' directory
      */
     private findTerraformFiles(dir: string, recursive: boolean = false): string[] {
         const files: string[] = [];
-        const ignoredDirs = ['.terraform', '.git', 'node_modules', 'dist', 'build', 'target'];
+        const ignoredDirs = ['.terraform', '.git', 'node_modules', 'dist', 'build', 'target', 'k8s-manifests', 'application'];
 
-        function scanDirectory(currentDir: string, depth: number = 0) {
+        // Helper to check if a path is inside a modules directory
+        const isInsideModules = (dirPath: string): boolean => {
+            const parts = dirPath.split(path.sep);
+            return parts.includes('modules');
+        };
+
+        const scanDirectory = (currentDir: string, isModulesDir: boolean = false) => {
             try {
-                // For recursive=false, only scan root directory (depth=0)
-                if (!recursive && depth > 0) {
-                    return;
-                }
-
                 const items = fs.readdirSync(currentDir, { withFileTypes: true });
 
                 for (const item of items) {
@@ -100,26 +102,28 @@ export class TerraformParser {
                             continue;
                         }
 
-                        // Special handling for 'modules' directory
-                        // Always scan modules directory even when recursive=false
-                        if (item.name === 'modules' || currentDir.includes('modules/')) {
-                            scanDirectory(fullPath, depth + 1);
+                        // Always scan 'modules' directory and its subdirectories
+                        if (item.name === 'modules') {
+                            scanDirectory(fullPath, true);
+                        } else if (isModulesDir || isInsideModules(currentDir)) {
+                            // We're inside modules, scan all subdirs (each module)
+                            scanDirectory(fullPath, true);
                         } else if (recursive) {
                             // Only recurse into other directories if recursive=true
-                            scanDirectory(fullPath, depth + 1);
+                            scanDirectory(fullPath, false);
                         }
                     } else if (item.isFile()) {
                         // Check for Terraform files
-                        const isTerraformFile = 
+                        const isTerraformFile =
                             item.name.endsWith('.tf') ||
-                            item.name.endsWith('.tf.json') ||
-                            item.name === 'terraform.tfvars' ||
-                            item.name === '.terraform.lock.hcl';
-                        
-                        // For terraform.tfstate, only include if it's in the root
-                        if (item.name === 'terraform.tfstate' && depth === 0) {
+                            item.name.endsWith('.tf.json');
+
+                        // Include tfvars only from root
+                        const isTfVars = item.name === 'terraform.tfvars' || item.name.endsWith('.tfvars');
+
+                        if (isTerraformFile) {
                             files.push(fullPath);
-                        } else if (isTerraformFile) {
+                        } else if (isTfVars && !isModulesDir && !isInsideModules(currentDir)) {
                             files.push(fullPath);
                         }
                     }
@@ -127,9 +131,9 @@ export class TerraformParser {
             } catch (error) {
                 console.error(`Error scanning directory ${currentDir}:`, error);
             }
-        }
+        };
 
-        scanDirectory(dir, 0);
+        scanDirectory(dir, false);
         return files;
     }
     
@@ -344,12 +348,16 @@ export class TerraformParser {
                 resource.tags = this.extractTagsFromAttributes(resource.attributes.tags);
             }
             
-            // Ensure module property is set (fallback to modulePath logic)
-            if (!resource.module && resource.file?.includes('modules/')) {
-                const parts = resource.file.split('/');
-                const moduleIndex = parts.indexOf('modules');
-                if (moduleIndex > -1 && parts.length > moduleIndex + 1) {
-                    resource.module = parts[moduleIndex + 1];
+            // Ensure module property is set from file path
+            if (!resource.module && resource.file) {
+                // Check for modules directory in path (handle both / and \ separators)
+                const normalizedPath = resource.file.replace(/\\/g, '/');
+                if (normalizedPath.includes('/modules/') || normalizedPath.startsWith('modules/')) {
+                    const parts = normalizedPath.split('/');
+                    const moduleIndex = parts.indexOf('modules');
+                    if (moduleIndex > -1 && parts.length > moduleIndex + 1) {
+                        resource.module = parts[moduleIndex + 1];
+                    }
                 }
             }
             
