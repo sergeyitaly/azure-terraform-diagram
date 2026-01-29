@@ -4,6 +4,7 @@
 export * from './security';
 export * from './cost';
 export * from './devops';
+export * from './networking';
 
 /**
  * Diagram connection between two nodes

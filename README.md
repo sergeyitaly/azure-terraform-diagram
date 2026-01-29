@@ -1,17 +1,25 @@
 # Azure Terraform Diagram
 
-Generate beautiful Microsoft Azure-style infrastructure diagrams from your Terraform projects automatically.
+Generate beautiful Microsoft Azure-style infrastructure diagrams from your Terraform projects automatically, with comprehensive DevOps insights including security analysis, cost estimation, and infrastructure metadata.
 
 ## Features
 
+### Core Diagram Features
 - **Auto-generate diagrams on save** - Automatically creates `architecture.png` when you save any `.tf` file
 - **Resource Group Grouping** - Resources are visually grouped inside their resource groups for clear organization
-- **Rich DevOps Details** - Displays CIDR ranges, SKUs, VM sizes, TLS versions, scaling configs, backup policies, and more
 - **Multi-project Support** - Each Terraform project folder gets its own separate diagram
 - **Interactive webview** - Explore your infrastructure with pan, zoom, and click-to-navigate
 - **Azure-style visuals** - Uses official Microsoft Azure icons and color schemes
 - **Dependency visualization** - Shows connections between resources with smart orthogonal routing
 - **Resource tooltips** - Hover for full details, click to jump to source code
+
+### DevOps Intelligence (NEW)
+- **Security Badges** - Visual indicators for security issues (missing encryption, public endpoints, weak TLS)
+- **Cost Estimation** - Monthly cost estimates displayed on resources and total architecture cost
+- **SKU Labels** - Resource tier and SKU information visible at a glance
+- **Tag Compliance** - Badges showing missing required tags
+- **Network Topology** - CIDR ranges, private endpoint indicators, data flow visualization
+- **Terraform Info Sidebar** - Providers, backend config, modules, variables, and outputs from HCL files
 
 ## Installation
 
@@ -33,8 +41,9 @@ https://marketplace.visualstudio.com/items?itemName=SerhiiVoinolovych.azure-terr
 
 Simply save any `.tf` file in your workspace. The extension automatically:
 1. Parses Terraform files in the **same folder** as the saved file
-2. Generates an `architecture.png` in that folder
-3. Shows a status bar confirmation
+2. Analyzes security posture, estimates costs, and extracts infrastructure metadata
+3. Generates an `architecture.png` in that folder
+4. Shows a status bar confirmation
 
 This allows you to have **multiple Terraform projects** in one workspace (e.g., `task01/`, `task02/`) and each will get its own separate `architecture.png`.
 
@@ -63,16 +72,146 @@ Open Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and run:
 
 Configure the extension in VS Code Settings (`Cmd+,` / `Ctrl+,`):
 
+### General Settings
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `azureTerraformDiagram.autoGenerateOnSave` | `true` | Automatically generate architecture.png when saving .tf files |
 | `azureTerraformDiagram.outputFileName` | `architecture.png` | Output file name for the generated diagram |
-| `azureTerraformDiagram.scopeToFolder` | `true` | When true, generates diagram only for the folder containing the saved .tf file |
+| `azureTerraformDiagram.scopeToFolder` | `true` | Generate diagram only for the folder containing the saved .tf file |
 | `azureTerraformDiagram.theme` | `auto` | Diagram color theme (auto, light, dark) |
 | `azureTerraformDiagram.showModuleDetails` | `true` | Show detailed module information |
 | `azureTerraformDiagram.excludeResourceTypes` | `[]` | Resource types to exclude (e.g., `azurerm_role_assignment`) |
 
-## DevOps-Relevant Details
+### Security & Compliance Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `azureTerraformDiagram.security.showBadges` | `true` | Show security assessment badges on diagram nodes |
+| `azureTerraformDiagram.security.severityThreshold` | `medium` | Minimum severity level to show (critical, high, medium, low, info) |
+| `azureTerraformDiagram.compliance.showTagBadges` | `true` | Show tag compliance badges on diagram nodes |
+| `azureTerraformDiagram.compliance.requiredTags` | `["environment", "owner"]` | List of required tags for compliance checking |
+
+### Cost Management Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `azureTerraformDiagram.cost.showEstimates` | `true` | Show monthly cost estimates on diagram nodes |
+| `azureTerraformDiagram.cost.currency` | `USD` | Currency for cost estimates (USD, EUR, GBP, JPY, CAD, AUD) |
+| `azureTerraformDiagram.showSKULabels` | `true` | Show SKU/tier information on diagram nodes |
+
+### Network Visualization Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `azureTerraformDiagram.network.showCIDR` | `true` | Show CIDR ranges for network resources |
+| `azureTerraformDiagram.network.showPrivateEndpoints` | `true` | Show private endpoint indicators on applicable resources |
+| `azureTerraformDiagram.network.showDataFlows` | `true` | Show data flow connections between resources |
+
+### Layout Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `azureTerraformDiagram.layout.mode` | `auto` | Layout mode: auto, hierarchical, network, or zones |
+
+## DevOps Features
+
+### Security Analysis
+
+The extension automatically analyzes your Terraform configuration for security best practices:
+
+| Check | Severity | Description |
+|-------|----------|-------------|
+| Public blob access | High | Storage accounts with `allow_nested_items_to_be_public = true` |
+| Weak TLS | Medium | Resources with TLS version below 1.2 |
+| Missing network rules | High | Storage accounts without network restrictions |
+| Public SQL access | High | SQL servers with `public_network_access_enabled = true` |
+| Missing purge protection | Medium | Key Vaults without purge protection enabled |
+| Public AKS cluster | Medium | AKS clusters without `private_cluster_enabled` |
+| Missing NSG | High | Compute resources without NSG association |
+| Missing managed identity | Low | Resources without managed identity configured |
+| Unencrypted storage | High | Storage without encryption at rest |
+| Missing HTTPS | Medium | App Services without HTTPS-only enforcement |
+
+Security badges appear in the top-right corner of affected resources:
+- **Red** - Critical severity
+- **Orange** - High severity
+- **Yellow** - Medium severity
+
+### Cost Estimation
+
+The extension provides Azure cost estimates based on resource SKUs:
+
+- **Per-resource costs** - Displayed below each resource node (e.g., "~$70/mo")
+- **Total architecture cost** - Shown in the bottom-right corner of the diagram
+- **SKU labels** - Resource tier visible on each node (e.g., "Standard_D2s_v3")
+
+Supported pricing for:
+- Virtual Machines (all common sizes)
+- Storage Accounts (Standard/Premium, LRS/GRS/ZRS)
+- SQL Databases (Basic, Standard, Premium tiers)
+- AKS Clusters (node pool costs)
+- App Services (Free, Shared, Basic, Standard, Premium)
+- Functions (Consumption, Premium)
+- Redis Cache (Basic, Standard, Premium)
+- Cosmos DB (Request Units)
+- Key Vault (operations-based)
+- And more...
+
+### Tag Compliance
+
+Configure required tags and see compliance status at a glance:
+
+```json
+{
+  "azureTerraformDiagram.compliance.requiredTags": ["environment", "owner", "cost-center"]
+}
+```
+
+Resources missing required tags display a warning badge.
+
+### Terraform Info Sidebar
+
+The interactive diagram sidebar displays infrastructure metadata extracted from your HCL files:
+
+#### Terraform Version
+Shows the `required_version` constraint from your terraform block.
+
+#### Providers
+Lists all configured providers with:
+- Provider name and alias
+- Version constraints
+- Source registry
+
+#### Backend Configuration
+Displays state backend details:
+- Backend type (azurerm, s3, gcs, remote, local)
+- Storage account, container, and key (for Azure)
+- Bucket and region (for AWS)
+- Organization and workspace (for Terraform Cloud)
+
+#### Modules
+Shows all module calls with:
+- Module name
+- Source type (registry, git, local, github)
+- Version constraint
+- Source URL
+
+#### Variables
+Lists input variables with:
+- Variable name
+- Type constraint
+- Description
+- Sensitivity flag
+- Default value indicator
+
+#### Outputs
+Shows output definitions with:
+- Output name
+- Description
+- Sensitivity flag
+
+## DevOps-Relevant Resource Details
 
 The diagram displays comprehensive technical details that DevOps engineers need:
 
@@ -139,18 +278,21 @@ Resources are automatically grouped by **Resource Group** for clear organization
 
 ```
 ┌─────────────── Resource Group: rg-production ───────────────┐
-│                                                              │
+│                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
 │  │ Virtual Net  │  │   Subnet     │  │     NSG      │       │
 │  │ 10.0.0.0/16  │  │ 10.0.1.0/24  │  │  5 rules     │       │
+│  │   ~$0/mo     │  │   ~$0/mo     │  │   ~$0/mo     │       │
 │  └──────────────┘  └──────────────┘  └──────────────┘       │
-│                                                              │
+│                                                             │
 │  ┌──────────────┐  ┌──────────────┐                         │
 │  │  Linux VM    │  │   Storage    │                         │
 │  │ Standard_D2s │  │ Standard_LRS │                         │
+│  │  ~$70/mo  ⚠️  │  │  ~$21/mo     │                         │
 │  └──────────────┘  └──────────────┘                         │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+│                                                             │
+│                        Total: ~$91/mo                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 Within each resource group, resources are organized by type with multiple instances displayed horizontally.
@@ -205,6 +347,17 @@ The extension requires the `sharp` library for PNG output. If it fails:
 - Enable `scopeToFolder` setting (enabled by default)
 - Right-click on specific folder to generate diagram for just that folder
 
+### Security badges not showing
+
+- Ensure `azureTerraformDiagram.security.showBadges` is enabled
+- Check `security.severityThreshold` - set to "low" to see all issues
+
+### Cost estimates showing $0
+
+- Cost estimation requires SKU information in your Terraform resources
+- Some resources (like VNets, Subnets) are free and show $0
+- Check that resource attributes include size/SKU configurations
+
 ## Development
 
 ```bash
@@ -226,15 +379,27 @@ npm run package
 ```
 azure-terraform-diagram/
 ├── src/
-│   ├── extension.ts        # Extension entry point
-│   ├── terraformParser.ts  # Terraform HCL parser
-│   ├── diagramLayout.ts    # Layout algorithms (zone & resource group grouping)
-│   ├── diagramRenderer.ts  # SVG/PNG generation with DevOps details
-│   └── azureIconMapper.ts  # Resource to icon mapping
+│   ├── extension.ts          # Extension entry point
+│   ├── terraformParser.ts    # Terraform HCL parser with infra info extraction
+│   ├── diagramLayout.ts      # Layout algorithms (zone & resource group grouping)
+│   ├── diagramRenderer.ts    # SVG/PNG generation with DevOps badges
+│   ├── azureIconMapper.ts    # Resource to icon mapping
+│   ├── types/
+│   │   ├── index.ts          # Type exports
+│   │   ├── security.ts       # Security posture types
+│   │   ├── cost.ts           # Cost estimation types
+│   │   └── devops.ts         # DevOps/infrastructure types
+│   ├── analyzers/
+│   │   ├── securityAnalyzer.ts   # Security posture analysis
+│   │   ├── costEstimator.ts      # Azure cost estimation
+│   │   └── networkAnalyzer.ts    # Network topology analysis
+│   └── data/
+│       ├── azurePricing.ts       # Azure SKU pricing data
+│       └── securityRules.ts      # Security best practice rules
 ├── resources/
-│   └── azure-icons/        # Azure service icons
+│   └── azure-icons/          # Azure service icons
 ├── media/
-│   └── icon.png           # Extension icon
+│   └── icon.png              # Extension icon
 ├── package.json
 └── tsconfig.json
 ```
@@ -251,4 +416,8 @@ GitHub: https://github.com/sergeyitaly/azure-terraform-diagram
 
 ---
 
-**Tip:** Add `architecture.png` to your git repository to share infrastructure diagrams with your team!
+**Tips:**
+- Add `architecture.png` to your git repository to share infrastructure diagrams with your team!
+- Configure required tags in settings to enforce tagging standards across your team
+- Use the security analysis to catch misconfigurations before they reach production
+- Review cost estimates during PR reviews to catch expensive resource changes

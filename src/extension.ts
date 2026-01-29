@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { TerraformParser, TerraformResource } from './terraformParser';
+import { TerraformParser, TerraformResource, TerraformInfraInfo } from './terraformParser';
 import { AzureIconMapper } from './azureIconMapper';
 import { DiagramLayout, DiagramNode, DiagramOptions, SecurityBadgeInfo, CostBadgeInfo, TagBadgeInfo } from './diagramLayout';
 import { DiagramRenderer } from './diagramRenderer';
@@ -433,7 +433,7 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
         // Use recursive scan when generating for entire workspace
         const useRecursive = !targetFolder;
         const resources = await parser.parseWorkspace(initialWorkspacePath, useRecursive);
-        
+
         if (token.isCancellationRequested) {
             return null;
         }
@@ -442,19 +442,31 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
             throw new Error('No Azure resources found in Terraform files.');
         }
 
+        // Parse DevOps infrastructure info (providers, backend, modules, variables, outputs)
+        progress.report({ message: 'Parsing infrastructure configuration...' });
+        const infraInfo = await parser.parseInfraInfo(initialWorkspacePath);
+        console.log('[DevOps] Parsed infra info:', {
+            providers: infraInfo.providers.length,
+            modules: infraInfo.modules.length,
+            variables: infraInfo.variables.length,
+            outputs: infraInfo.outputs.length,
+            backend: infraInfo.backend?.type || 'none',
+            requiredVersion: infraInfo.requiredVersion || 'unspecified'
+        });
+
         progress.report({ message: `Found ${resources.length} resources, creating diagram...` });
-        
+
         // Extract dependencies and create layout
         const dependencies = DiagramLayout.extractDependencies(resources);
-        let diagramNodes = DiagramLayout.createLayout(resources,dependencies);     
-        const devOpsConfig = getDevOpsConfig();          
-        diagramNodes = enhanceNodesWithDevOpsFeatures(diagramNodes, resources, devOpsConfig);                            
-                                      
+        let diagramNodes = DiagramLayout.createLayout(resources, dependencies);
+        const devOpsConfig = getDevOpsConfig();
+        diagramNodes = enhanceNodesWithDevOpsFeatures(diagramNodes, resources, devOpsConfig);
+
         // Debug output
         console.log(`Resources: ${resources.length}`);
         console.log(`Diagram nodes: ${diagramNodes.length}`);
         console.log(`Dependencies map entries: ${dependencies.size}`);
-        
+
         // Check node properties
         diagramNodes.forEach((node, index) => {
             console.log(`Node ${index}: ${node.name}, type: ${node.type}, x=${node.x}, y=${node.y}, width=${node.width}, height=${node.height}`);
@@ -468,15 +480,15 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
                 console.log(`  Security: ${node.securityBadges.length} issues`);
             }
         });
-        
-        return { resources, diagramNodes, workspacePath: initialWorkspacePath };
+
+        return { resources, diagramNodes, workspacePath: initialWorkspacePath, infraInfo };
     });
 
     if (!result) {
         return; // Cancelled
     }
 
-    const { resources, diagramNodes, workspacePath } = result;
+    const { resources, diagramNodes, workspacePath, infraInfo } = result;
 
     // Create webview panel
     const panel = vscode.window.createWebviewPanel(
@@ -494,7 +506,7 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
     );
 
     // Set webview content
-    panel.webview.html = getWebviewContent(panel, context, resources, diagramNodes, workspacePath);
+    panel.webview.html = getWebviewContent(panel, context, resources, diagramNodes, workspacePath, infraInfo);
 
     // Handle messages from webview
     panel.webview.onDidReceiveMessage(
@@ -535,7 +547,8 @@ function getWebviewContent(
     context: vscode.ExtensionContext,
     resources: TerraformResource[],
     diagramNodes: DiagramNode[],
-    workspacePath: string
+    workspacePath: string,
+    infraInfo?: TerraformInfraInfo
 ): string {
     // Group resources by type for statistics
     const resourcesByType: { [key: string]: TerraformResource[] } = {};
@@ -776,6 +789,17 @@ function getWebviewContent(
                         display: none;
                     }
 
+                    .node-type-display {
+                        font-size: 7px;
+                        color: #605E5C;
+                        font-style: italic;
+                        margin-top: 0;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        line-height: 1.1;
+                    }
+
                     .node-detail {
                         font-size: 8px;
                         font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
@@ -933,6 +957,12 @@ function getWebviewContent(
                     .total-cost-display .total-amount {
                         font-size: 14px;
                         font-weight: bold;
+                    }
+
+                    .total-cost-display .total-resources {
+                        font-size: 8px;
+                        opacity: 0.8;
+                        font-weight: normal;
                     }
 
                     /* Category left-border accents */
@@ -1217,6 +1247,110 @@ function getWebviewContent(
                         padding: 0 2px;
                         font-size: 4px;
                     }
+
+                    /* DevOps Info Section Styles */
+                    .devops-info-section {
+                        margin-top: 10px;
+                    }
+
+                    .devops-item {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 2px;
+                        padding: 4px 8px;
+                        background: var(--vscode-list-inactiveSelectionBackground);
+                        border-radius: 4px;
+                        margin-bottom: 4px;
+                        font-size: 9px;
+                    }
+
+                    .devops-item-header {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                        font-weight: 500;
+                    }
+
+                    .devops-item-detail {
+                        font-size: 8px;
+                        color: var(--vscode-descriptionForeground);
+                        padding-left: 16px;
+                    }
+
+                    .devops-badge {
+                        display: inline-block;
+                        padding: 1px 4px;
+                        border-radius: 3px;
+                        font-size: 7px;
+                        font-weight: 500;
+                    }
+
+                    .devops-badge.provider {
+                        background: rgba(0, 120, 212, 0.15);
+                        color: #0078D4;
+                    }
+
+                    .devops-badge.backend {
+                        background: rgba(16, 124, 16, 0.15);
+                        color: #107C10;
+                    }
+
+                    .devops-badge.module {
+                        background: rgba(134, 97, 197, 0.15);
+                        color: #8661C5;
+                    }
+
+                    .devops-badge.variable {
+                        background: rgba(255, 140, 0, 0.15);
+                        color: #FF8C00;
+                    }
+
+                    .devops-badge.output {
+                        background: rgba(0, 153, 188, 0.15);
+                        color: #0099BC;
+                    }
+
+                    .devops-subsection {
+                        margin-bottom: 8px;
+                    }
+
+                    .devops-subsection-title {
+                        font-size: 9px;
+                        font-weight: 600;
+                        color: var(--vscode-descriptionForeground);
+                        margin-bottom: 4px;
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                    }
+
+                    .devops-count {
+                        font-size: 8px;
+                        color: var(--vscode-descriptionForeground);
+                        font-weight: normal;
+                    }
+
+                    .collapsible-section {
+                        cursor: pointer;
+                    }
+
+                    .collapsible-section .section-content {
+                        max-height: 150px;
+                        overflow-y: auto;
+                    }
+
+                    .collapsible-section.collapsed .section-content {
+                        display: none;
+                    }
+
+                    .section-toggle {
+                        font-size: 8px;
+                        transition: transform 0.2s;
+                    }
+
+                    .collapsible-section.collapsed .section-toggle {
+                        transform: rotate(-90deg);
+                    }
                         </style>
 
         </head>
@@ -1285,8 +1419,128 @@ function getWebviewContent(
                             }).join('')}
                         </div>
                     </div>
+
+                    ${infraInfo ? `
+                    <div class="sidebar-section devops-info-section">
+                        <h2>Terraform Info</h2>
+
+                        ${infraInfo.requiredVersion ? `
+                        <div class="devops-item">
+                            <div class="devops-item-header">
+                                <span>TF Version:</span>
+                                <span class="devops-badge provider">${infraInfo.requiredVersion}</span>
+                            </div>
+                        </div>
+                        ` : ''}
+
+                        ${infraInfo.providers.length > 0 ? `
+                        <div class="devops-subsection collapsible-section" id="providersSection">
+                            <div class="devops-subsection-title" onclick="toggleSection('providersSection')">
+                                <span class="section-toggle">▼</span>
+                                <span>Providers</span>
+                                <span class="devops-count">(${infraInfo.providers.length})</span>
+                            </div>
+                            <div class="section-content">
+                                ${infraInfo.providers.map(p => `
+                                    <div class="devops-item">
+                                        <div class="devops-item-header">
+                                            <span class="devops-badge provider">${p.name}</span>
+                                            ${p.version ? `<span style="font-size: 8px; color: var(--vscode-descriptionForeground);">${p.version}</span>` : ''}
+                                        </div>
+                                        ${p.source ? `<div class="devops-item-detail">${p.source}</div>` : ''}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                        ` : ''}
+
+                        ${infraInfo.backend ? `
+                        <div class="devops-subsection">
+                            <div class="devops-subsection-title">
+                                <span>Backend</span>
+                            </div>
+                            <div class="devops-item">
+                                <div class="devops-item-header">
+                                    <span class="devops-badge backend">${infraInfo.backend.type}</span>
+                                </div>
+                                ${infraInfo.backend.storageAccountName ? `<div class="devops-item-detail">Storage: ${infraInfo.backend.storageAccountName}</div>` : ''}
+                                ${infraInfo.backend.containerName ? `<div class="devops-item-detail">Container: ${infraInfo.backend.containerName}</div>` : ''}
+                                ${infraInfo.backend.key ? `<div class="devops-item-detail">Key: ${infraInfo.backend.key}</div>` : ''}
+                                ${infraInfo.backend.bucket ? `<div class="devops-item-detail">Bucket: ${infraInfo.backend.bucket}</div>` : ''}
+                                ${infraInfo.backend.organization ? `<div class="devops-item-detail">Org: ${infraInfo.backend.organization}</div>` : ''}
+                            </div>
+                        </div>
+                        ` : ''}
+
+                        ${infraInfo.modules.length > 0 ? `
+                        <div class="devops-subsection collapsible-section" id="modulesSection">
+                            <div class="devops-subsection-title" onclick="toggleSection('modulesSection')">
+                                <span class="section-toggle">▼</span>
+                                <span>Modules</span>
+                                <span class="devops-count">(${infraInfo.modules.length})</span>
+                            </div>
+                            <div class="section-content">
+                                ${infraInfo.modules.map(m => `
+                                    <div class="devops-item">
+                                        <div class="devops-item-header">
+                                            <span class="devops-badge module">${m.name}</span>
+                                            ${m.version ? `<span style="font-size: 8px; color: var(--vscode-descriptionForeground);">v${m.version}</span>` : ''}
+                                        </div>
+                                        <div class="devops-item-detail">${m.sourceType}: ${m.source.length > 30 ? m.source.substring(0, 30) + '...' : m.source}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                        ` : ''}
+
+                        ${infraInfo.variables.length > 0 ? `
+                        <div class="devops-subsection collapsible-section collapsed" id="variablesSection">
+                            <div class="devops-subsection-title" onclick="toggleSection('variablesSection')">
+                                <span class="section-toggle">▼</span>
+                                <span>Variables</span>
+                                <span class="devops-count">(${infraInfo.variables.length})</span>
+                            </div>
+                            <div class="section-content">
+                                ${infraInfo.variables.slice(0, 10).map(v => `
+                                    <div class="devops-item">
+                                        <div class="devops-item-header">
+                                            <span class="devops-badge variable">${v.name}</span>
+                                            ${v.sensitive ? '<span style="font-size: 7px; color: #E81123;">sensitive</span>' : ''}
+                                        </div>
+                                        ${v.type ? `<div class="devops-item-detail">Type: ${v.type}</div>` : ''}
+                                        ${v.description ? `<div class="devops-item-detail">${v.description.length > 40 ? v.description.substring(0, 40) + '...' : v.description}</div>` : ''}
+                                    </div>
+                                `).join('')}
+                                ${infraInfo.variables.length > 10 ? `<div class="devops-item-detail" style="text-align: center;">... and ${infraInfo.variables.length - 10} more</div>` : ''}
+                            </div>
+                        </div>
+                        ` : ''}
+
+                        ${infraInfo.outputs.length > 0 ? `
+                        <div class="devops-subsection collapsible-section collapsed" id="outputsSection">
+                            <div class="devops-subsection-title" onclick="toggleSection('outputsSection')">
+                                <span class="section-toggle">▼</span>
+                                <span>Outputs</span>
+                                <span class="devops-count">(${infraInfo.outputs.length})</span>
+                            </div>
+                            <div class="section-content">
+                                ${infraInfo.outputs.slice(0, 10).map(o => `
+                                    <div class="devops-item">
+                                        <div class="devops-item-header">
+                                            <span class="devops-badge output">${o.name}</span>
+                                            ${o.sensitive ? '<span style="font-size: 7px; color: #E81123;">sensitive</span>' : ''}
+                                        </div>
+                                        ${o.description ? `<div class="devops-item-detail">${o.description.length > 40 ? o.description.substring(0, 40) + '...' : o.description}</div>` : ''}
+                                    </div>
+                                `).join('')}
+                                ${infraInfo.outputs.length > 10 ? `<div class="devops-item-detail" style="text-align: center;">... and ${infraInfo.outputs.length - 10} more</div>` : ''}
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                    ` : ''}
                 </div>
-                
+
                 <div class="diagram-container" id="diagramContainer">
                     <div class="diagram-canvas" id="diagramCanvas">
                         <!-- Nodes will be rendered here by JavaScript -->
@@ -1302,8 +1556,15 @@ function getWebviewContent(
                 <button class="control-btn" id="resetView" title="Reset View">🔄</button>
                 <button class="control-btn" id="fitToScreen" title="Fit to Screen">📐</button>
             </div>
+
+            <!-- Total Cost Display -->
+            <div class="total-cost-display" id="totalCostDisplay" style="display: none;">
+                <div class="total-label">Estimated Monthly Cost</div>
+                <div class="total-amount" id="totalCostAmount">$0.00</div>
+                <div class="total-resources" id="totalCostResources">0 resources</div>
+            </div>
         </div>
-        
+
         <script>
             const vscode = acquireVsCodeApi();
             
@@ -1597,10 +1858,14 @@ function getWebviewContent(
                     const privateEndpointHtml = node.hasPrivateEndpoint ? 
                         '<div style="font-size: 8px; color: #107c10; margin-top: 1px;">🔒 Private Endpoint</div>' : '';
                     
+                    // Format resource type for display (remove azurerm_ prefix, replace underscores)
+                    const resourceTypeDisplay = node.type.replace('azurerm_', '').replace(/_/g, ' ');
+
                     nodeEl.innerHTML = \`
                         <img src="\${iconMap[node.id]}" class="node-icon" alt="\${node.type}">
                         <div class="node-label">
                             <div class="node-name">\${displayName}</div>
+                            <div class="node-type-display">\${resourceTypeDisplay}</div>
                             \${detailHtml}
                             \${cidrHtml}
                             \${skuHtml}
@@ -2025,6 +2290,14 @@ function getWebviewContent(
                 };
             }
             
+            // Toggle collapsible sections in sidebar
+            function toggleSection(sectionId) {
+                const section = document.getElementById(sectionId);
+                if (section) {
+                    section.classList.toggle('collapsed');
+                }
+            }
+
             function setupEventListeners() {
                 const container = document.getElementById('diagramContainer');
                 const canvas = document.getElementById('diagramCanvas');
@@ -2240,6 +2513,54 @@ function getWebviewContent(
                 }
             }
             
+            // Calculate and display total cost
+            function calculateTotalCost() {
+                let totalMonthlyCost = 0;
+                let resourcesWithCost = 0;
+
+                diagramNodes.forEach(node => {
+                    if (node.costBadge && node.costBadge.monthlyCost > 0) {
+                        totalMonthlyCost += node.costBadge.monthlyCost;
+                        resourcesWithCost++;
+                    }
+                });
+
+                const totalCostDisplay = document.getElementById('totalCostDisplay');
+                const totalCostAmount = document.getElementById('totalCostAmount');
+                const totalCostResources = document.getElementById('totalCostResources');
+
+                if (totalMonthlyCost > 0 && totalCostDisplay) {
+                    totalCostDisplay.style.display = 'flex';
+
+                    // Format cost
+                    let formattedCost;
+                    if (totalMonthlyCost >= 10000) {
+                        formattedCost = '$' + (totalMonthlyCost / 1000).toFixed(1) + 'k/mo';
+                    } else if (totalMonthlyCost >= 1000) {
+                        formattedCost = '$' + (totalMonthlyCost / 1000).toFixed(2) + 'k/mo';
+                    } else {
+                        formattedCost = '$' + totalMonthlyCost.toFixed(2) + '/mo';
+                    }
+
+                    totalCostAmount.textContent = formattedCost;
+                    totalCostResources.textContent = resourcesWithCost + ' priced resources';
+
+                    // Color based on cost
+                    if (totalMonthlyCost > 5000) {
+                        totalCostDisplay.style.background = 'rgba(232, 17, 35, 0.9)'; // Red for high cost
+                    } else if (totalMonthlyCost > 1000) {
+                        totalCostDisplay.style.background = 'rgba(255, 140, 0, 0.9)'; // Orange for medium cost
+                    } else {
+                        totalCostDisplay.style.background = 'rgba(0, 120, 212, 0.9)'; // Blue for normal
+                    }
+                }
+
+                return { totalMonthlyCost, resourcesWithCost };
+            }
+
+            // Call on load
+            const costSummary = calculateTotalCost();
+
             // Send loaded message
             vscode.postMessage({
                 command: 'webviewReady',
@@ -2249,7 +2570,9 @@ function getWebviewContent(
                     nodesWithConnections: diagramNodes.filter(n => n.connections && n.connections.length > 0).length,
                     groupNodes: diagramNodes.filter(n => n.isGroupContainer).length,
                     nodesWithCostBadges: diagramNodes.filter(n => n.costBadge).length,
-                    nodesWithSecurityBadges: diagramNodes.filter(n => n.securityBadges && n.securityBadges.length > 0).length
+                    nodesWithSecurityBadges: diagramNodes.filter(n => n.securityBadges && n.securityBadges.length > 0).length,
+                    totalMonthlyCost: costSummary.totalMonthlyCost,
+                    resourcesWithCost: costSummary.resourcesWithCost
                 }
             });
         </script>

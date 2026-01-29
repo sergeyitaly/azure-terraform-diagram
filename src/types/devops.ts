@@ -1,6 +1,77 @@
 // src/types/devops.ts
 
 /**
+ * Terraform infrastructure information extracted from HCL files
+ */
+export interface TerraformInfraInfo {
+    terraformVersion?: string;
+    requiredVersion?: string;
+    providers: ProviderInfo[];
+    backend?: BackendInfo;
+    modules: ModuleInfo[];
+    variables: VariableInfo[];
+    outputs: OutputInfo[];
+    workspaces?: string[];
+}
+
+export interface ProviderInfo {
+    name: string;
+    source?: string;
+    version?: string;
+    versionConstraint?: string;
+    alias?: string;
+    configuration?: Record<string, any>;
+}
+
+export interface BackendInfo {
+    type: string; // 'azurerm', 's3', 'gcs', 'remote', 'local', etc.
+    configuration: Record<string, any>;
+    // Azure-specific
+    resourceGroupName?: string;
+    storageAccountName?: string;
+    containerName?: string;
+    key?: string;
+    // AWS-specific
+    bucket?: string;
+    region?: string;
+    // Remote (Terraform Cloud)
+    organization?: string;
+    workspaceName?: string;
+}
+
+export interface ModuleInfo {
+    name: string;
+    source: string;
+    version?: string;
+    sourceType: 'registry' | 'git' | 'local' | 'github' | 'bitbucket' | 's3' | 'gcs' | 'unknown';
+    inputs: Record<string, any>;
+    file: string;
+    line?: number;
+}
+
+export interface VariableInfo {
+    name: string;
+    type?: string;
+    default?: any;
+    description?: string;
+    sensitive?: boolean;
+    validation?: string;
+    nullable?: boolean;
+    file: string;
+    line?: number;
+}
+
+export interface OutputInfo {
+    name: string;
+    value?: string;
+    description?: string;
+    sensitive?: boolean;
+    dependsOn?: string[];
+    file: string;
+    line?: number;
+}
+
+/**
  * Pipeline information for DevOps integration
  */
 export interface PipelineInfo {

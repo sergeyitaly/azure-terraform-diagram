@@ -1303,4 +1303,522 @@ export class TerraformParser {
 
         return { levels, resourceGroups, rootResources, leafResources, maxDepth };
     }
+
+    // ==========================================
+    // DevOps HCL Parsing Methods
+    // ==========================================
+
+    /**
+     * Parse Terraform infrastructure info from HCL files (providers, backend, modules, variables, outputs)
+     */
+    async parseInfraInfo(workspacePath: string): Promise<TerraformInfraInfo> {
+        const info: TerraformInfraInfo = {
+            providers: [],
+            modules: [],
+            variables: [],
+            outputs: []
+        };
+
+        // Find all .tf files
+        const tfFiles = this.findTerraformFiles(workspacePath, true);
+
+        // Parse lock file for provider versions
+        const lockFile = path.join(workspacePath, '.terraform.lock.hcl');
+        if (fs.existsSync(lockFile)) {
+            const lockProviders = await this.parseLockFile(lockFile);
+            info.providers.push(...lockProviders);
+        }
+
+        // Parse each .tf file for terraform blocks, providers, modules, variables, outputs
+        for (const file of tfFiles) {
+            try {
+                const content = await fs.promises.readFile(file, 'utf8');
+
+                // Parse terraform block
+                const terraformInfo = this.parseTerraformBlock(content);
+                if (terraformInfo.requiredVersion) {
+                    info.requiredVersion = terraformInfo.requiredVersion;
+                }
+                if (terraformInfo.backend) {
+                    info.backend = terraformInfo.backend;
+                }
+                // Merge required providers (from terraform block)
+                for (const provider of terraformInfo.requiredProviders) {
+                    const existing = info.providers.find(p => p.name === provider.name);
+                    if (existing) {
+                        existing.versionConstraint = provider.versionConstraint || existing.versionConstraint;
+                        existing.source = provider.source || existing.source;
+                    } else {
+                        info.providers.push(provider);
+                    }
+                }
+
+                // Parse standalone provider blocks
+                const providers = this.parseProviderBlocks(content);
+                for (const provider of providers) {
+                    const existing = info.providers.find(p => p.name === provider.name && p.alias === provider.alias);
+                    if (existing) {
+                        existing.configuration = { ...existing.configuration, ...provider.configuration };
+                    } else {
+                        info.providers.push(provider);
+                    }
+                }
+
+                // Parse module blocks
+                const modules = this.parseModuleBlocks(content, file);
+                info.modules.push(...modules);
+
+                // Parse variable blocks
+                const variables = this.parseVariableBlocks(content, file);
+                info.variables.push(...variables);
+
+                // Parse output blocks
+                const outputs = this.parseOutputBlocks(content, file);
+                info.outputs.push(...outputs);
+
+            } catch (error) {
+                console.error(`Error parsing infra info from ${file}:`, error);
+            }
+        }
+
+        return info;
+    }
+
+    /**
+     * Parse .terraform.lock.hcl file for provider versions
+     */
+    private async parseLockFile(filePath: string): Promise<ProviderInfo[]> {
+        const providers: ProviderInfo[] = [];
+
+        try {
+            const content = await fs.promises.readFile(filePath, 'utf8');
+
+            // Match provider blocks in lock file
+            const providerRegex = /provider\s+"([^"]+)"\s*{([^}]*)}/gs;
+            let match;
+
+            while ((match = providerRegex.exec(content)) !== null) {
+                const source = match[1];
+                const body = match[2];
+
+                // Extract version
+                const versionMatch = body.match(/version\s*=\s*"([^"]+)"/);
+                const version = versionMatch ? versionMatch[1] : undefined;
+
+                // Extract provider name from source
+                const nameParts = source.split('/');
+                const name = nameParts[nameParts.length - 1];
+
+                providers.push({
+                    name,
+                    source,
+                    version
+                });
+            }
+        } catch (error) {
+            console.error(`Error parsing lock file ${filePath}:`, error);
+        }
+
+        return providers;
+    }
+
+    /**
+     * Parse terraform block for required_version and backend
+     */
+    private parseTerraformBlock(content: string): {
+        requiredVersion?: string;
+        backend?: BackendInfo;
+        requiredProviders: ProviderInfo[];
+    } {
+        const result: { requiredVersion?: string; backend?: BackendInfo; requiredProviders: ProviderInfo[] } = {
+            requiredProviders: []
+        };
+
+        // Find terraform block
+        const terraformBlockRegex = /terraform\s*{([\s\S]*?)^}/gm;
+        const terraformMatch = terraformBlockRegex.exec(content);
+
+        if (terraformMatch) {
+            const terraformBody = terraformMatch[1];
+
+            // Extract required_version
+            const versionMatch = terraformBody.match(/required_version\s*=\s*"([^"]+)"/);
+            if (versionMatch) {
+                result.requiredVersion = versionMatch[1];
+            }
+
+            // Extract backend block
+            const backendMatch = terraformBody.match(/backend\s+"(\w+)"\s*{([^}]*)}/s);
+            if (backendMatch) {
+                const backendType = backendMatch[1];
+                const backendBody = backendMatch[2];
+
+                const config: Record<string, any> = {};
+                const attrRegex = /(\w+)\s*=\s*(?:"([^"]*)"|(\S+))/g;
+                let attrMatch;
+                while ((attrMatch = attrRegex.exec(backendBody)) !== null) {
+                    config[attrMatch[1]] = attrMatch[2] || attrMatch[3];
+                }
+
+                result.backend = {
+                    type: backendType,
+                    configuration: config,
+                    // Azure-specific
+                    resourceGroupName: config.resource_group_name,
+                    storageAccountName: config.storage_account_name,
+                    containerName: config.container_name,
+                    key: config.key,
+                    // AWS-specific
+                    bucket: config.bucket,
+                    region: config.region,
+                    // Remote (Terraform Cloud)
+                    organization: config.organization,
+                    workspaceName: config.workspace || config.workspaces?.name
+                };
+            }
+
+            // Extract required_providers block
+            const reqProvidersMatch = terraformBody.match(/required_providers\s*{([\s\S]*?)}/);
+            if (reqProvidersMatch) {
+                const reqProvidersBody = reqProvidersMatch[1];
+
+                // Match each provider entry
+                const providerEntryRegex = /(\w+)\s*=\s*{([^}]*)}/g;
+                let providerMatch;
+                while ((providerMatch = providerEntryRegex.exec(reqProvidersBody)) !== null) {
+                    const providerName = providerMatch[1];
+                    const providerBody = providerMatch[2];
+
+                    const sourceMatch = providerBody.match(/source\s*=\s*"([^"]+)"/);
+                    const versionMatch = providerBody.match(/version\s*=\s*"([^"]+)"/);
+
+                    result.requiredProviders.push({
+                        name: providerName,
+                        source: sourceMatch ? sourceMatch[1] : undefined,
+                        versionConstraint: versionMatch ? versionMatch[1] : undefined
+                    });
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Parse provider blocks
+     */
+    private parseProviderBlocks(content: string): ProviderInfo[] {
+        const providers: ProviderInfo[] = [];
+
+        // Match provider blocks (not inside terraform block)
+        const providerRegex = /^provider\s+"(\w+)"\s*{([^}]*)}/gm;
+        let match;
+
+        while ((match = providerRegex.exec(content)) !== null) {
+            const name = match[1];
+            const body = match[2];
+
+            const config: Record<string, any> = {};
+            let alias: string | undefined;
+
+            // Extract attributes
+            const attrRegex = /(\w+)\s*=\s*(?:"([^"]*)"|(\S+))/g;
+            let attrMatch;
+            while ((attrMatch = attrRegex.exec(body)) !== null) {
+                const key = attrMatch[1];
+                const value = attrMatch[2] || attrMatch[3];
+                if (key === 'alias') {
+                    alias = value;
+                } else {
+                    config[key] = value;
+                }
+            }
+
+            providers.push({
+                name,
+                alias,
+                configuration: config
+            });
+        }
+
+        return providers;
+    }
+
+    /**
+     * Parse module blocks
+     */
+    private parseModuleBlocks(content: string, filePath: string): ModuleInfo[] {
+        const modules: ModuleInfo[] = [];
+        const lines = content.split('\n');
+
+        // Match module blocks
+        const moduleRegex = /^module\s+"([^"]+)"\s*{/gm;
+        let match;
+
+        while ((match = moduleRegex.exec(content)) !== null) {
+            const name = match[1];
+            const startIndex = match.index;
+
+            // Find line number
+            const lineNum = content.substring(0, startIndex).split('\n').length;
+
+            // Find the end of the block
+            const blockContent = this.extractBlock(content.substring(startIndex));
+
+            // Extract source
+            const sourceMatch = blockContent.match(/source\s*=\s*"([^"]+)"/);
+            const source = sourceMatch ? sourceMatch[1] : 'unknown';
+
+            // Extract version
+            const versionMatch = blockContent.match(/version\s*=\s*"([^"]+)"/);
+            const version = versionMatch ? versionMatch[1] : undefined;
+
+            // Determine source type
+            const sourceType = this.determineModuleSourceType(source);
+
+            // Extract inputs (non-source, non-version attributes)
+            const inputs: Record<string, any> = {};
+            const inputRegex = /^\s*(\w+)\s*=\s*(.+)$/gm;
+            let inputMatch;
+            while ((inputMatch = inputRegex.exec(blockContent)) !== null) {
+                const key = inputMatch[1];
+                if (key !== 'source' && key !== 'version' && key !== 'providers') {
+                    inputs[key] = inputMatch[2].trim();
+                }
+            }
+
+            modules.push({
+                name,
+                source,
+                version,
+                sourceType,
+                inputs,
+                file: filePath,
+                line: lineNum
+            });
+        }
+
+        return modules;
+    }
+
+    /**
+     * Determine module source type
+     */
+    private determineModuleSourceType(source: string): ModuleInfo['sourceType'] {
+        if (source.startsWith('./') || source.startsWith('../')) {
+            return 'local';
+        }
+        if (source.startsWith('git::') || source.includes('.git')) {
+            return 'git';
+        }
+        if (source.startsWith('github.com/')) {
+            return 'github';
+        }
+        if (source.startsWith('bitbucket.org/')) {
+            return 'bitbucket';
+        }
+        if (source.startsWith('s3::')) {
+            return 's3';
+        }
+        if (source.startsWith('gcs::')) {
+            return 'gcs';
+        }
+        if (source.includes('/') && !source.includes('://')) {
+            return 'registry';
+        }
+        return 'unknown';
+    }
+
+    /**
+     * Parse variable blocks
+     */
+    private parseVariableBlocks(content: string, filePath: string): VariableInfo[] {
+        const variables: VariableInfo[] = [];
+
+        // Match variable blocks
+        const variableRegex = /^variable\s+"([^"]+)"\s*{/gm;
+        let match;
+
+        while ((match = variableRegex.exec(content)) !== null) {
+            const name = match[1];
+            const startIndex = match.index;
+
+            // Find line number
+            const lineNum = content.substring(0, startIndex).split('\n').length;
+
+            // Find the end of the block
+            const blockContent = this.extractBlock(content.substring(startIndex));
+
+            // Extract type
+            const typeMatch = blockContent.match(/type\s*=\s*(\S+)/);
+            const type = typeMatch ? typeMatch[1] : undefined;
+
+            // Extract default
+            const defaultMatch = blockContent.match(/default\s*=\s*(?:"([^"]*)"|(\[[\s\S]*?\])|({[\s\S]*?})|(\S+))/);
+            const defaultValue = defaultMatch ? (defaultMatch[1] || defaultMatch[2] || defaultMatch[3] || defaultMatch[4]) : undefined;
+
+            // Extract description
+            const descMatch = blockContent.match(/description\s*=\s*"([^"]*)"/);
+            const description = descMatch ? descMatch[1] : undefined;
+
+            // Extract sensitive
+            const sensitiveMatch = blockContent.match(/sensitive\s*=\s*(true|false)/);
+            const sensitive = sensitiveMatch ? sensitiveMatch[1] === 'true' : false;
+
+            // Extract nullable
+            const nullableMatch = blockContent.match(/nullable\s*=\s*(true|false)/);
+            const nullable = nullableMatch ? nullableMatch[1] === 'true' : undefined;
+
+            variables.push({
+                name,
+                type,
+                default: defaultValue,
+                description,
+                sensitive,
+                nullable,
+                file: filePath,
+                line: lineNum
+            });
+        }
+
+        return variables;
+    }
+
+    /**
+     * Parse output blocks
+     */
+    private parseOutputBlocks(content: string, filePath: string): OutputInfo[] {
+        const outputs: OutputInfo[] = [];
+
+        // Match output blocks
+        const outputRegex = /^output\s+"([^"]+)"\s*{/gm;
+        let match;
+
+        while ((match = outputRegex.exec(content)) !== null) {
+            const name = match[1];
+            const startIndex = match.index;
+
+            // Find line number
+            const lineNum = content.substring(0, startIndex).split('\n').length;
+
+            // Find the end of the block
+            const blockContent = this.extractBlock(content.substring(startIndex));
+
+            // Extract value
+            const valueMatch = blockContent.match(/value\s*=\s*(.+)/);
+            const value = valueMatch ? valueMatch[1].trim() : undefined;
+
+            // Extract description
+            const descMatch = blockContent.match(/description\s*=\s*"([^"]*)"/);
+            const description = descMatch ? descMatch[1] : undefined;
+
+            // Extract sensitive
+            const sensitiveMatch = blockContent.match(/sensitive\s*=\s*(true|false)/);
+            const sensitive = sensitiveMatch ? sensitiveMatch[1] === 'true' : false;
+
+            outputs.push({
+                name,
+                value,
+                description,
+                sensitive,
+                file: filePath,
+                line: lineNum
+            });
+        }
+
+        return outputs;
+    }
+
+    /**
+     * Extract a block (handles nested braces)
+     */
+    private extractBlock(content: string): string {
+        let depth = 0;
+        let started = false;
+        let result = '';
+
+        for (const char of content) {
+            if (char === '{') {
+                depth++;
+                started = true;
+            }
+            if (started) {
+                result += char;
+            }
+            if (char === '}') {
+                depth--;
+                if (depth === 0 && started) {
+                    break;
+                }
+            }
+        }
+
+        return result;
+    }
+}
+
+// Type exports for DevOps info
+export interface TerraformInfraInfo {
+    terraformVersion?: string;
+    requiredVersion?: string;
+    providers: ProviderInfo[];
+    backend?: BackendInfo;
+    modules: ModuleInfo[];
+    variables: VariableInfo[];
+    outputs: OutputInfo[];
+    workspaces?: string[];
+}
+
+export interface ProviderInfo {
+    name: string;
+    source?: string;
+    version?: string;
+    versionConstraint?: string;
+    alias?: string;
+    configuration?: Record<string, any>;
+}
+
+export interface BackendInfo {
+    type: string;
+    configuration: Record<string, any>;
+    resourceGroupName?: string;
+    storageAccountName?: string;
+    containerName?: string;
+    key?: string;
+    bucket?: string;
+    region?: string;
+    organization?: string;
+    workspaceName?: string;
+}
+
+export interface ModuleInfo {
+    name: string;
+    source: string;
+    version?: string;
+    sourceType: 'registry' | 'git' | 'local' | 'github' | 'bitbucket' | 's3' | 'gcs' | 'unknown';
+    inputs: Record<string, any>;
+    file: string;
+    line?: number;
+}
+
+export interface VariableInfo {
+    name: string;
+    type?: string;
+    default?: any;
+    description?: string;
+    sensitive?: boolean;
+    validation?: string;
+    nullable?: boolean;
+    file: string;
+    line?: number;
+}
+
+export interface OutputInfo {
+    name: string;
+    value?: string;
+    description?: string;
+    sensitive?: boolean;
+    dependsOn?: string[];
+    file: string;
+    line?: number;
 }
