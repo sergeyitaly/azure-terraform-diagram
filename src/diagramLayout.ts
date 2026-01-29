@@ -1,6 +1,28 @@
 import { TerraformResource, SecurityRule } from './terraformParser';
 import { AzureIconMapper, AzureResourceCategory } from './azureIconMapper';
 
+export interface SecurityBadgeInfo {
+    severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+    icon: string;
+    title: string;
+    tooltip: string;
+}
+
+export interface CostBadgeInfo {
+    monthlyCost: number;
+    currency: string;
+    formattedCost: string;
+    tier?: string;
+    isHighCost?: boolean;
+}
+
+export interface TagBadgeInfo {
+    hasRequiredTags: boolean;
+    missingCount: number;
+    missingTags: string[];
+    tooltip: string;
+}
+
 export interface DiagramNode {
     id: string;
     type: string;
@@ -24,6 +46,19 @@ export interface DiagramNode {
     zone?: string;
     icon?: string;
     displayName?: string;
+    resourceType?: string;
+    resourceName?: string;
+    // DevOps feature badges
+    securityBadges?: SecurityBadgeInfo[];
+    overallSecurityScore?: 'critical' | 'high' | 'medium' | 'low' | 'info';
+    costBadge?: CostBadgeInfo;
+    skuLabel?: string;
+    tagBadge?: TagBadgeInfo;
+    // Network topology
+    cidrRange?: string;
+    hasPrivateEndpoint?: boolean;
+    // Data flow
+    dataFlows?: { targetId: string; flowType: string; label?: string }[];
 }
 
 export interface DiagramConnection {
@@ -40,33 +75,49 @@ export interface DiagramConnection {
 }
 
 export interface DiagramOptions {
-    layout?: 'flow' | 'layered' | 'zones' | 'microservices';
+    layout?: 'flow' | 'layered' | 'zones' | 'microservices' | 'network-topology' | 'cost-center' | 'environment-comparison';
     flowDirection?: 'left-right' | 'top-bottom' | 'right-left' | 'bottom-top';
     showZones?: boolean;
     showIcons?: boolean;
     showDescriptions?: boolean;
-    
+
     includeCategories?: AzureResourceCategory[];
     excludeCategories?: AzureResourceCategory[];
     includeTypes?: string[];
     excludeTypes?: string[];
     environment?: string;
-    
+
     showCriticalConnectionsOnly?: boolean;
     maxConnectionsPerResource?: number;
     hideImplicitDependencies?: boolean;
     hideCrossEnvironment?: boolean;
-    
-    groupBy?: 'zone' | 'function' | 'layer' | 'resourceGroup' | 'module' | 'none';
-    
+
+    groupBy?: 'zone' | 'function' | 'layer' | 'resourceGroup' | 'module' | 'costCenter' | 'none';
+
     theme?: 'light' | 'dark' | 'blueprint';
     showGrid?: boolean;
     showTitles?: boolean;
     compactMode?: boolean;
-    
+
     width?: number;
     height?: number;
     padding?: number;
+
+    // DevOps feature options
+    showSecurityBadges?: boolean;
+    securitySeverityThreshold?: 'critical' | 'high' | 'medium' | 'low' | 'info';
+    showCostEstimates?: boolean;
+    costCurrency?: string;
+    showSKULabels?: boolean;
+    showTagCompliance?: boolean;
+    requiredTags?: string[];
+    showCIDR?: boolean;
+    showPrivateEndpoints?: boolean;
+    showDataFlows?: boolean;
+
+    // Environment comparison
+    environments?: string[];
+    highlightDifferences?: boolean;
 }
 
 export class DiagramLayout {

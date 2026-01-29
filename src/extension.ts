@@ -2,11 +2,31 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { TerraformParser, TerraformResource } from './terraformParser';
 import { AzureIconMapper } from './azureIconMapper';
-import { DiagramLayout, DiagramNode } from './diagramLayout';
+import { DiagramLayout, DiagramNode, DiagramOptions, SecurityBadgeInfo, CostBadgeInfo, TagBadgeInfo } from './diagramLayout';
 import { DiagramRenderer } from './diagramRenderer';
+import { SecurityAnalyzer } from './analyzers/securityAnalyzer';
+import { CostEstimator } from './analyzers/costEstimator';
+import { NetworkAnalyzer } from './analyzers/networkAnalyzer';
+import { SecurityPosture, SecuritySeverity } from './types/security';
+import { CostEstimate, TagCompliance, SKUInfo } from './types/cost';
 
 // Debounce timer for save events
 let saveDebounceTimer: NodeJS.Timeout | undefined;
+
+// DevOps feature configuration interface
+interface DevOpsConfig {
+    showSecurityBadges: boolean;
+    severityThreshold: SecuritySeverity;
+    showCostEstimates: boolean;
+    currency: string;
+    showSKULabels: boolean;
+    showTagCompliance: boolean;
+    requiredTags: string[];
+    showCIDR: boolean;
+    showPrivateEndpoints: boolean;
+    showDataFlows: boolean;
+    layoutMode: string;
+}
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Azure Terraform Diagram extension activated!');
@@ -123,6 +143,210 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 /**
+ * Get DevOps configuration from VS Code settings
+ */
+function getDevOpsConfig(): DevOpsConfig {
+    const config = vscode.workspace.getConfiguration('azureTerraformDiagram');
+    return {
+        showSecurityBadges: config.get<boolean>('security.showBadges', true),
+        severityThreshold: config.get<SecuritySeverity>('security.severityThreshold', 'medium'),
+        showCostEstimates: config.get<boolean>('cost.showEstimates', false),
+        currency: config.get<string>('cost.currency', 'USD'),
+        showSKULabels: config.get<boolean>('showSKULabels', true),
+        showTagCompliance: config.get<boolean>('compliance.showTagBadges', true),
+        requiredTags: config.get<string[]>('compliance.requiredTags', ['environment', 'owner']),
+        showCIDR: config.get<boolean>('network.showCIDR', true),
+        showPrivateEndpoints: config.get<boolean>('network.showPrivateEndpoints', true),
+        showDataFlows: config.get<boolean>('network.showDataFlows', false),
+        layoutMode: config.get<string>('layout.mode', 'auto')
+    };
+}
+
+/**
+ * Enhance diagram nodes with DevOps features (security badges, costs, etc.)
+ */
+function enhanceNodesWithDevOpsFeatures(
+    nodes: DiagramNode[],
+    resources: TerraformResource[],
+    devOpsConfig: DevOpsConfig
+): DiagramNode[] {
+    const resourceMap = new Map<string, TerraformResource>();
+    resources.forEach(r => resourceMap.set(`${r.type}_${r.name}`, r));
+
+    // Analyze security if enabled
+    let securityPostures: Map<string, SecurityPosture> | undefined;
+    if (devOpsConfig.showSecurityBadges) {
+        const securityAnalyzer = new SecurityAnalyzer(resources);
+        securityPostures = securityAnalyzer.analyzeAll();
+    }
+
+    // Analyze costs if enabled
+    let costEstimates: Map<string, CostEstimate> | undefined;
+    let skuInfoMap: Map<string, SKUInfo> | undefined;
+    if (devOpsConfig.showCostEstimates || devOpsConfig.showSKULabels) {
+        const costEstimator = new CostEstimator(resources, devOpsConfig.currency);
+        if (devOpsConfig.showCostEstimates) {
+            costEstimates = costEstimator.estimateAll();
+        }
+        if (devOpsConfig.showSKULabels) {
+            skuInfoMap = costEstimator.extractAllSKUInfo();
+        }
+    }
+
+    // Analyze tag compliance if enabled
+    let tagCompliance: Map<string, TagCompliance> | undefined;
+    if (devOpsConfig.showTagCompliance) {
+        const costEstimator = new CostEstimator(resources);
+        tagCompliance = costEstimator.analyzeTagCompliance(devOpsConfig.requiredTags);
+    }
+
+    // Analyze network topology
+    let networkAnalyzer: NetworkAnalyzer | undefined;
+    if (devOpsConfig.showCIDR || devOpsConfig.showPrivateEndpoints || devOpsConfig.showDataFlows) {
+        networkAnalyzer = new NetworkAnalyzer(resources);
+    }
+
+    // Get data flows if enabled
+    let dataFlows: Map<string, { targetId: string; flowType: string; label?: string }[]> | undefined;
+    if (devOpsConfig.showDataFlows && networkAnalyzer) {
+        const flows = networkAnalyzer.analyzeDataFlows();
+        dataFlows = new Map();
+        for (const flow of flows) {
+            const existing = dataFlows.get(flow.sourceId) || [];
+            existing.push({
+                targetId: flow.targetId,
+                flowType: flow.flowType,
+                label: flow.label
+            });
+            dataFlows.set(flow.sourceId, existing);
+        }
+    }
+
+    // Enhance each node
+    return nodes.map(node => {
+        const enhanced = { ...node };
+        const resource = resourceMap.get(node.id);
+
+        // Add security badges
+        if (securityPostures && devOpsConfig.showSecurityBadges) {
+            const posture = securityPostures.get(node.id);
+            if (posture && posture.indicators.length > 0) {
+                // Filter by severity threshold
+                const severityOrder: SecuritySeverity[] = ['critical', 'high', 'medium', 'low', 'info'];
+                const thresholdIndex = severityOrder.indexOf(devOpsConfig.severityThreshold);
+                const filteredIndicators = posture.indicators.filter(ind => {
+                    const indIndex = severityOrder.indexOf(ind.severity);
+                    return indIndex <= thresholdIndex;
+                });
+
+                if (filteredIndicators.length > 0) {
+                    enhanced.securityBadges = filteredIndicators.map(ind => ({
+                        severity: ind.severity,
+                        icon: getSecurityIconChar(ind.severity),
+                        title: ind.title,
+                        tooltip: `${ind.title}: ${ind.description}`
+                    }));
+                    enhanced.overallSecurityScore = posture.overallScore;
+                }
+            }
+        }
+
+        // Add cost badge
+        if (costEstimates && devOpsConfig.showCostEstimates) {
+            const estimate = costEstimates.get(node.id);
+            if (estimate && estimate.monthlyCost > 0) {
+                enhanced.costBadge = {
+                    monthlyCost: estimate.monthlyCost,
+                    currency: estimate.currency,
+                    formattedCost: formatCost(estimate.monthlyCost, estimate.currency),
+                    tier: estimate.tier,
+                    isHighCost: estimate.monthlyCost > 500 // Mark as high cost if > $500/month
+                };
+            }
+        }
+
+        // Add SKU label
+        if (skuInfoMap && devOpsConfig.showSKULabels) {
+            const skuInfo = skuInfoMap.get(node.id);
+            if (skuInfo && skuInfo.sku && skuInfo.sku !== 'Standard' && skuInfo.sku !== 'N/A') {
+                enhanced.skuLabel = skuInfo.sku;
+            }
+        }
+
+        // Add tag compliance badge
+        if (tagCompliance && devOpsConfig.showTagCompliance) {
+            const compliance = tagCompliance.get(node.id);
+            if (compliance && !compliance.hasRequiredTags) {
+                enhanced.tagBadge = {
+                    hasRequiredTags: false,
+                    missingCount: compliance.missingTags.length,
+                    missingTags: compliance.missingTags,
+                    tooltip: `Missing tags: ${compliance.missingTags.join(', ')}`
+                };
+            }
+        }
+
+        // Add CIDR range for network resources
+        if (devOpsConfig.showCIDR && resource) {
+            const attrs = resource.attributes || {};
+            if (resource.type === 'azurerm_virtual_network' && attrs.address_space) {
+                const space = Array.isArray(attrs.address_space) ? attrs.address_space[0] : attrs.address_space;
+                enhanced.cidrRange = space;
+            } else if (resource.type === 'azurerm_subnet') {
+                const prefix = attrs.address_prefixes || attrs.address_prefix;
+                enhanced.cidrRange = Array.isArray(prefix) ? prefix[0] : prefix;
+            }
+        }
+
+        // Check for private endpoint
+        if (devOpsConfig.showPrivateEndpoints && networkAnalyzer) {
+            const topology = networkAnalyzer.analyzeTopology();
+            const hasPrivateEndpoint = topology.privateEndpoints.some(
+                pe => pe.targetResourceId.includes(node.name)
+            );
+            enhanced.hasPrivateEndpoint = hasPrivateEndpoint;
+        }
+
+        // Add data flows
+        if (dataFlows && devOpsConfig.showDataFlows) {
+            const nodeFlows = dataFlows.get(node.id);
+            if (nodeFlows) {
+                enhanced.dataFlows = nodeFlows;
+            }
+        }
+
+        return enhanced;
+    });
+}
+
+/**
+ * Get security icon character for severity
+ */
+function getSecurityIconChar(severity: SecuritySeverity): string {
+    switch (severity) {
+        case 'critical': return '!!';
+        case 'high': return '!';
+        case 'medium': return '⚠';
+        case 'low': return 'i';
+        case 'info': return 'ℹ';
+        default: return '?';
+    }
+}
+
+/**
+ * Format cost for display
+ */
+function formatCost(cost: number, currency: string): string {
+    if (cost < 1) {
+        return `~${currency === 'USD' ? '$' : currency}${cost.toFixed(2)}/mo`;
+    } else if (cost < 100) {
+        return `~${currency === 'USD' ? '$' : currency}${Math.round(cost)}/mo`;
+    } else {
+        return `~${currency === 'USD' ? '$' : currency}${(cost / 1000).toFixed(1)}k/mo`;
+    }
+}
+
+/**
  * Generate PNG diagram and save to workspace
  * @param context Extension context
  * @param targetFolder Optional specific folder to generate diagram for
@@ -138,7 +362,7 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
 
     // Parse Terraform files - use non-recursive scan for folder-specific generation
     const parser = new TerraformParser();
-    
+
     // IMPORTANT: When targetFolder is specified (folder-scoped), use non-recursive
     // When no targetFolder (full workspace), use recursive
     const useRecursive = !targetFolder;
@@ -151,7 +375,11 @@ async function generatePNGDiagram(context: vscode.ExtensionContext, targetFolder
 
     // Create layout
     const dependencies = DiagramLayout.extractDependencies(resources);
-    const diagramNodes = DiagramLayout.createLayout(resources, dependencies);
+    let diagramNodes = DiagramLayout.createLayout(resources, dependencies);
+
+    // Enhance with DevOps features
+    const devOpsConfig = getDevOpsConfig();
+    diagramNodes = enhanceNodesWithDevOpsFeatures(diagramNodes, resources, devOpsConfig);
 
     // Get output file name from config
     const config = vscode.workspace.getConfiguration('azureTerraformDiagram');
@@ -218,8 +446,10 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
         
         // Extract dependencies and create layout
         const dependencies = DiagramLayout.extractDependencies(resources);
-        const diagramNodes = DiagramLayout.createLayout(resources, dependencies);
-        
+        let diagramNodes = DiagramLayout.createLayout(resources,dependencies);     
+        const devOpsConfig = getDevOpsConfig();          
+        diagramNodes = enhanceNodesWithDevOpsFeatures(diagramNodes, resources, devOpsConfig);                            
+                                      
         // Debug output
         console.log(`Resources: ${resources.length}`);
         console.log(`Diagram nodes: ${diagramNodes.length}`);
@@ -230,6 +460,13 @@ async function generateDiagram(context: vscode.ExtensionContext, targetFolder?: 
             console.log(`Node ${index}: ${node.name}, type: ${node.type}, x=${node.x}, y=${node.y}, width=${node.width}, height=${node.height}`);
             console.log(`  Category: ${node.category}, Level: ${node.level}, IsGroup: ${node.isGroupContainer}, Parent: ${node.parentGroup}`);
             console.log(`  Connections: ${node.connections.length}`);
+            // Debug cost badges
+            if (node.costBadge) {
+                console.log(`  Cost: ${node.costBadge.formattedCost}`);
+            }
+            if (node.securityBadges && node.securityBadges.length > 0) {
+                console.log(`  Security: ${node.securityBadges.length} issues`);
+            }
         });
         
         return { resources, diagramNodes, workspacePath: initialWorkspacePath };
@@ -341,482 +578,647 @@ function getWebviewContent(
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Azure Infrastructure Diagram</title>
             <style>
-                :root {
-                    --azure-blue: #0078D4;
-                    --azure-green: #107C10;
-                    --azure-purple: #68217A;
-                    --azure-orange: #FF8C00;
-                    --azure-red: #F25022;
-                }
-                
-                body {
-                    font-family: 'Segoe UI', var(--vscode-font-family), sans-serif;
-                    margin: 0;
-                    padding: 0;
-                    background: var(--vscode-editor-background);
-                    color: var(--vscode-editor-foreground);
-                    overflow: hidden;
-                }
-                
-                .app-container {
-                    display: flex;
-                    flex-direction: column;
-                    height: 100vh;
-                }
-                
-                .header {
-                    background: linear-gradient(135deg, var(--azure-blue), #005A9E);
-                    color: white;
-                    padding: 15px 25px;
-                    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-                }
-                
-                .header-content {
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                }
-                
-                .header h1 {
-                    margin: 0;
-                    font-size: 20px;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                }
-                
-                .stats {
-                    display: flex;
-                    gap: 15px;
-                    font-size: 12px;
-                }
-                
-                .stat-item {
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 5px 12px;
-                    border-radius: 15px;
-                    display: flex;
-                    align-items: center;
-                    gap: 5px;
-                }
-                
-                .main-content {
-                    display: flex;
-                    flex: 1;
-                    overflow: hidden;
-                }
-                
-                .sidebar {
-                    width: 200px;
-                    background: var(--vscode-sideBar-background);
-                    border-right: 1px solid var(--vscode-panel-border);
-                    overflow-y: auto;
-                    padding: 12px;
-                }
-                
-                .sidebar-section {
-                    margin-bottom: 15px;
-                }
+                    :root {
+                        --azure-blue: #0078D4;
+                        --azure-green: #107C10;
+                        --azure-purple: #68217A;
+                        --azure-orange: #FF8C00;
+                        --azure-red: #F25022;
+                    }
 
-                .sidebar h2 {
-                    color: var(--azure-blue);
-                    font-size: 11px;
-                    margin: 0 0 8px 0;
-                    padding-bottom: 5px;
-                    border-bottom: 1px solid var(--vscode-panel-border);
-                    text-transform: uppercase;
-                    letter-spacing: 0.5px;
-                }
-                
-                .resource-type-list {
-                    display: flex;
-                    flex-direction: column;
-                    gap: 4px;
-                }
-                
-                .resource-type-item {
-                    display: flex;
-                    align-items: center;
-                    gap: 6px;
-                    padding: 5px 8px;
-                    background: var(--vscode-list-inactiveSelectionBackground);
-                    border-radius: 4px;
-                    cursor: pointer;
-                    transition: background 0.2s;
-                }
-                
-                .resource-type-item:hover {
-                    background: var(--vscode-list-hoverBackground);
-                }
-                
-                .resource-type-icon {
-                    width: 16px;
-                    height: 16px;
-                    min-width: 16px;
-                }
-                
-                .resource-type-info {
-                    flex: 1;
-                }
-                
-                .resource-type-name {
-                    font-size: 10px;
-                    font-weight: 500;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }
+                    body {
+                        font-family: 'Segoe UI', var(--vscode-font-family), sans-serif;
+                        margin: 0;
+                        padding: 0;
+                        background: var(--vscode-editor-background);
+                        color: var(--vscode-editor-foreground);
+                        overflow: hidden;
+                    }
 
-                .resource-type-count {
-                    font-size: 9px;
-                    color: var(--vscode-descriptionForeground);
-                }
-                
-                .diagram-container {
-                    flex: 1;
-                    position: relative;
-                    overflow: auto;
-                    background: #FFFFFF;
-                }
-                
-                .diagram-canvas {
-                    position: relative;
-                    min-width: 3000px;
-                    min-height: 2000px;
-                }
-                
-                .diagram-node {
-                    position: absolute;
-                    background: #FFFFFF;
-                    border: 1px solid #E1DFDD;
-                    border-radius: 5px;
-                    border-left: 3px solid #A19F9D;
-                    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-                    cursor: pointer;
-                    transition: box-shadow 0.15s, border-color 0.15s;
-                    display: flex;
-                    flex-direction: row;
-                    align-items: center;
-                    justify-content: flex-start;
-                    overflow: hidden;
-                    box-sizing: border-box;
-                    padding: 4px 6px;
-                    gap: 5px;
-                }
+                    .app-container {
+                        display: flex;
+                        flex-direction: column;
+                        height: 100vh;
+                    }
 
-                .diagram-node:hover {
-                    box-shadow: 0 2px 8px rgba(0,120,212,0.18);
-                    border-color: #0078D4;
-                    z-index: 1000;
-                }
+                    .header {
+                        background: linear-gradient(135deg, var(--azure-blue), #005A9E);
+                        color: white;
+                        padding: 15px 25px;
+                        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+                    }
 
-                .node-icon {
-                    width: 24px;
-                    height: 24px;
-                    min-width: 24px;
-                    object-fit: contain;
-                    flex-shrink: 0;
-                }
+                    .header-content {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    }
 
-                .node-label {
-                    text-align: left;
-                    min-width: 0;
-                    flex: 1;
-                }
+                    .header h1 {
+                        margin: 0;
+                        font-size: 20px;
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                    }
 
-                .node-name {
-                    font-weight: 600;
-                    font-size: 9px;
-                    margin-bottom: 0;
-                    color: #201F1E;
-                    line-height: 1.2;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                }
+                    .stats {
+                        display: flex;
+                        gap: 15px;
+                        font-size: 12px;
+                    }
 
-                .node-type {
-                    display: none;
-                }
+                    .stat-item {
+                        background: rgba(255, 255, 255, 0.1);
+                        padding: 5px 12px;
+                        border-radius: 15px;
+                        display: flex;
+                        align-items: center;
+                        gap: 5px;
+                    }
 
-                .node-detail {
-                    font-size: 8px;
-                    font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
-                    color: #0078D4;
-                    margin-top: 1px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                    line-height: 1.1;
-                }
+                    .main-content {
+                        display: flex;
+                        flex: 1;
+                        overflow: hidden;
+                    }
 
-                /* Category left-border accents */
-                .diagram-node[data-category="Compute"] { border-left-color: #107C10; }
-                .diagram-node[data-category="Networking"] { border-left-color: #00485B; }
-                .diagram-node[data-category="Storage"] { border-left-color: #0078D4; }
-                .diagram-node[data-category="Databases"] { border-left-color: #E81123; }
-                .diagram-node[data-category="Security"] { border-left-color: #FF8C00; }
-                .diagram-node[data-category="Monitoring + Management"] { border-left-color: #8661C5; }
-                .diagram-node[data-category="Containers"] { border-left-color: #00BCF2; }
-                .diagram-node[data-category="Web"] { border-left-color: #FFB900; }
-                .diagram-node[data-category="Identity"] { border-left-color: #5C2D91; }
-                .diagram-node[data-category="Analytics"] { border-left-color: #0099BC; }
-                .diagram-node[data-category="AI + Machine Learning"] { border-left-color: #7719AA; }
-                .diagram-node[data-category="Integration"] { border-left-color: #CA5010; }
-                .diagram-node[data-category="DevOps"] { border-left-color: #038387; }
-                .diagram-node[data-category="General"] { border-left-color: #69797E; }
-                
-                .connection {
-                    position: absolute;
-                    pointer-events: none;
-                }
-                
-                .connection-line {
-                    stroke-width: 1;
-                    stroke: #A19F9D;
-                    stroke-opacity: 0.5;
-                    stroke-dasharray: none;
-                    fill: none;
-                }
+                    .sidebar {
+                        width: 200px;
+                        background: var(--vscode-sideBar-background);
+                        border-right: 1px solid var(--vscode-panel-border);
+                        overflow-y: auto;
+                        padding: 12px;
+                    }
 
-                .connection-line.dashed {
-                    stroke-dasharray: 6, 4;
-                }
+                    .sidebar-section {
+                        margin-bottom: 15px;
+                    }
 
-                .connection-line.dotted {
-                    stroke-dasharray: 2, 4;
-                }
+                    .sidebar h2 {
+                        color: var(--azure-blue);
+                        font-size: 11px;
+                        margin: 0 0 8px 0;
+                        padding-bottom: 5px;
+                        border-bottom: 1px solid var(--vscode-panel-border);
+                        text-transform: uppercase;
+                        letter-spacing: 0.5px;
+                    }
 
-                .connection-line.containment {
-                    stroke: #C8C6C4;
-                    stroke-dasharray: 6, 4;
-                    stroke-width: 1;
-                    stroke-opacity: 0.4;
-                }
+                    .resource-type-list {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 4px;
+                    }
 
-                .connection-arrow {
-                    fill: #A19F9D;
-                    fill-opacity: 0.4;
-                }
-                
-                .legend {
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 6px;
-                    margin-top: 8px;
-                }
+                    .resource-type-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                        padding: 5px 8px;
+                        background: var(--vscode-list-inactiveSelectionBackground);
+                        border-radius: 4px;
+                        cursor: pointer;
+                        transition: background 0.2s;
+                    }
 
-                .legend-item {
-                    display: flex;
-                    align-items: center;
-                    gap: 4px;
-                    font-size: 9px;
-                }
+                    .resource-type-item:hover {
+                        background: var(--vscode-list-hoverBackground);
+                    }
 
-                .legend-color {
-                    width: 10px;
-                    height: 10px;
-                    border-radius: 2px;
-                }
-                
-                .controls {
-                    position: fixed;
-                    bottom: 20px;
-                    right: 20px;
-                    display: flex;
-                    flex-direction: column;
-                    gap: 10px;
-                }
-                
-                .control-btn {
-                    width: 40px;
-                    height: 40px;
-                    border-radius: 50%;
-                    background: var(--vscode-button-background);
-                    color: var(--vscode-button-foreground);
-                    border: none;
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-                    transition: background 0.2s;
-                }
-                
-                .control-btn:hover {
-                    background: var(--vscode-button-hoverBackground);
-                }
-                
-                .tooltip {
-                    position: absolute;
-                    background: var(--vscode-editorWidget-background);
-                    border: 1px solid var(--vscode-widget-border);
-                    border-radius: 6px;
-                    padding: 12px;
-                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-                    max-width: 300px;
-                    z-index: 10000;
-                    pointer-events: none;
-                    opacity: 0;
-                    transition: opacity 0.2s;
-                }
-                
-                .tooltip-title {
-                    font-weight: bold;
-                    margin-bottom: 5px;
-                    color: var(--azure-blue);
-                }
-                
-                .tooltip-detail {
-                    font-size: 11px;
-                    margin: 3px 0;
-                    display: flex;
-                    justify-content: space-between;
-                }
-                
-                .tooltip-label {
-                    color: var(--vscode-descriptionForeground);
-                }
-                
-                .tooltip-value {
-                    font-family: 'Monaco', 'Courier New', monospace;
-                }
-                
-                .search-box {
-                    margin-bottom: 10px;
-                }
+                    .resource-type-icon {
+                        width: 16px;
+                        height: 16px;
+                        min-width: 16px;
+                    }
 
-                .search-input {
-                    width: 100%;
-                    padding: 5px 8px;
-                    background: var(--vscode-input-background);
-                    color: var(--vscode-input-foreground);
-                    border: 1px solid var(--vscode-input-border);
-                    border-radius: 3px;
-                    font-size: 10px;
-                    box-sizing: border-box;
-                }
-                
-                /* Group container styles */
-                .diagram-node.group-container {
-                    border: 1.5px solid rgba(0, 0, 0, 0.10);
-                    border-left: 3px solid rgba(0, 120, 212, 0.5);
-                    border-radius: 8px;
-                    background: rgba(243, 242, 241, 0.30);
-                    box-shadow: none;
-                    padding: 0;
-                    flex-direction: column;
-                    align-items: flex-start;
-                    justify-content: flex-start;
-                }
+                    .resource-type-info {
+                        flex: 1;
+                    }
 
-                .diagram-node.group-container:hover {
-                    box-shadow: none;
-                    border-color: rgba(0, 0, 0, 0.15);
-                }
+                    .resource-type-name {
+                        font-size: 10px;
+                        font-weight: 500;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
 
-                .diagram-node.group-container .node-label {
-                    position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    background: rgba(0, 120, 212, 0.06);
-                    border-radius: 7px 7px 0 0;
-                    padding: 4px 12px;
-                    margin: 0;
-                    width: auto;
-                    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-                }
+                    .resource-type-count {
+                        font-size: 9px;
+                        color: var(--vscode-descriptionForeground);
+                    }
 
-                /* Zone-specific tint classes */
-                .zone-networking {
-                    background: rgba(0, 72, 91, 0.06) !important;
-                    border-color: rgba(0, 72, 91, 0.18) !important;
-                }
-                .zone-data {
-                    background: rgba(0, 120, 212, 0.06) !important;
-                    border-color: rgba(0, 120, 212, 0.18) !important;
-                }
-                .zone-application {
-                    background: rgba(16, 124, 16, 0.06) !important;
-                    border-color: rgba(16, 124, 16, 0.18) !important;
-                }
-                .zone-security {
-                    background: rgba(255, 140, 0, 0.06) !important;
-                    border-color: rgba(255, 140, 0, 0.18) !important;
-                }
-                .zone-management {
-                    background: rgba(134, 97, 197, 0.06) !important;
-                    border-color: rgba(134, 97, 197, 0.18) !important;
-                }
-                .zone-identity {
-                    background: rgba(92, 45, 145, 0.06) !important;
-                    border-color: rgba(92, 45, 145, 0.18) !important;
-                }
-                .zone-edge {
-                    background: rgba(0, 0, 0, 0.03) !important;
-                    border-color: rgba(0, 0, 0, 0.10) !important;
-                }
-                .zone-dmz {
-                    background: rgba(255, 0, 0, 0.04) !important;
-                    border-color: rgba(255, 0, 0, 0.12) !important;
-                }
-                .zone-presentation {
-                    background: rgba(104, 33, 122, 0.05) !important;
-                    border-color: rgba(104, 33, 122, 0.14) !important;
-                }
+                    .diagram-container {
+                        flex: 1;
+                        position: relative;
+                        overflow: auto;
+                        background: #FFFFFF;
+                    }
 
-                .diagram-node.level-0 {
-                    /* Top-level nodes */
-                    z-index: 10;
-                }
+                    .diagram-canvas {
+                        position: relative;
+                        min-width: 3000px;
+                        min-height: 2000px;
+                    }
 
-                .diagram-node.level-1 {
-                    /* Nodes inside groups */
-                    z-index: 20;
-                    border-width: 1.5px;
-                }
+                    .diagram-node {
+                        position: absolute;
+                        background: #FFFFFF;
+                        border: 1px solid #E1DFDD;
+                        border-radius: 5px;
+                        border-left: 3px solid #A19F9D;
+                        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+                        cursor: pointer;
+                        transition: box-shadow 0.15s, border-color 0.15s;
+                        display: flex;
+                        flex-direction: row;
+                        align-items: center;
+                        justify-content: flex-start;
+                        overflow: visible; /* Changed from hidden to visible for badges */
+                        box-sizing: border-box;
+                        padding: 4px 6px;
+                        gap: 5px;
+                    }
 
-                .diagram-node.level-2 {
-                    /* Nested nodes */
-                    z-index: 30;
-                    border-width: 1px;
-                }
+                    .diagram-node:hover {
+                        box-shadow: 0 2px 8px rgba(0,120,212,0.18);
+                        border-color: #0078D4;
+                        z-index: 1000;
+                    }
 
-                /* Category / zone / layer headers */
-                .diagram-node.category-header {
-                    background: transparent;
-                    border: none;
-                    border-left: none;
-                    box-shadow: none;
-                    height: 24px !important;
-                    justify-content: flex-start;
-                    padding-left: 4px;
-                }
+                    .node-icon {
+                        width: 24px;
+                        height: 24px;
+                        min-width: 24px;
+                        object-fit: contain;
+                        flex-shrink: 0;
+                    }
 
-                .diagram-node.category-header:hover {
-                    box-shadow: none;
-                    border-color: transparent;
-                }
+                    .node-label {
+                        text-align: left;
+                        min-width: 0;
+                        flex: 1;
+                    }
 
-                .diagram-node.category-header .node-name {
-                    font-size: 11px;
-                    font-weight: 600;
-                    color: #605E5C;
-                    letter-spacing: 0.3px;
-                    text-transform: uppercase;
-                }
+                    .node-name {
+                        font-weight: 600;
+                        font-size: 9px;
+                        margin-bottom: 0;
+                        color: #201F1E;
+                        line-height: 1.2;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
 
-                .diagram-node.category-header .node-icon {
-                    display: none;
-                }
+                    .node-type {
+                        display: none;
+                    }
 
-                .diagram-node.category-header .node-type {
-                    display: none;
-                }
-                
-                /* Category classes (no visual styling - icons are standalone) */
-            </style>
+                    .node-detail {
+                        font-size: 8px;
+                        font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
+                        color: #0078D4;
+                        margin-top: 1px;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                        white-space: nowrap;
+                        line-height: 1.1;
+                    }
+
+                    /* Cost badge styles */
+                    .cost-badge {
+                        background: #f0f8ff;
+                        border: 1px solid #0078d4;
+                        border-radius: 3px;
+                        padding: 1px 3px;
+                        font-size: 5px;
+                        font-weight: bold;
+                        color: #0078d4;
+                        white-space: nowrap;
+                        line-height: 1;
+                        display: inline-block;
+                        position: relative;
+                        z-index: 10;
+                    }
+
+                    .cost-badge.high-cost {
+                        background: #fff0f0;
+                        border-color: #e81123;
+                        color: #e81123;
+                    }
+
+                    /* SKU label styles */
+                    .sku-label {
+                        background: #f3f2f1;
+                        border: 1px solid #a19f9d;
+                        border-radius: 2px;
+                        padding: 1px 2px;
+                        font-size: 5px;
+                        color: #605e5c;
+                        font-family: 'Monaco', 'Consolas', monospace;
+                        margin-top: 0;
+                        line-height: 1;
+                        display: inline-block;
+                    }
+
+                    /* Tag compliance badge */
+                    .tag-badge {
+                        background: #fff4ce;
+                        border: 1px solid #ffb900;
+                        border-radius: 2px;
+                        padding: 1px 2px;
+                        font-size: 5px;
+                        color: #8a6d3b;
+                        line-height: 1;
+                        display: inline-block;
+                    }
+
+                    /* Security badge styles */
+                    .security-badge {
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 50%;
+                        font-size: 4px;
+                        font-weight: bold;
+                        line-height: 1;
+                        position: relative;
+                        z-index: 10;
+                    }
+
+                    .security-badge.critical {
+                        background: #e81123;
+                        color: white;
+                    }
+
+                    .security-badge.high {
+                        background: #ff8c00;
+                        color: white;
+                    }
+
+                    .security-badge.medium {
+                        background: #ffb900;
+                        color: black;
+                    }
+
+                    .security-badge.low {
+                        background: #107c10;
+                        color: white;
+                    }
+
+                    .security-badge.info {
+                        background: #0078d4;
+                        color: white;
+                    }
+
+                    /* Badges container - FIXED POSITIONING */
+                    .node-badges {
+                        position: absolute;
+                        top: -5px;
+                        right: -5px;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: flex-end;
+                        gap: 1px;
+                        pointer-events: none;
+                        z-index: 20;
+                        max-width: 60px; /* Limit width to prevent overflow */
+                    }
+
+                    /* Compact badges layout */
+                    .badge-row {
+                        display: flex;
+                        gap: 1px;
+                        align-items: center;
+                        justify-content: flex-end;
+                    }
+
+                    /* Inline badges (inside node) */
+                    .inline-badges {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 2px;
+                        margin-top: 1px;
+                        max-width: 100%;
+                    }
+
+                    /* Total cost display */
+                    .total-cost-display {
+                        position: fixed;
+                        bottom: 70px;
+                        right: 20px;
+                        background: rgba(0, 120, 212, 0.9);
+                        color: white;
+                        padding: 8px 12px;
+                        border-radius: 6px;
+                        font-size: 12px;
+                        font-weight: bold;
+                        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+                        z-index: 1000;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 2px;
+                        min-width: 120px;
+                    }
+
+                    .total-cost-display .total-label {
+                        font-size: 9px;
+                        opacity: 0.9;
+                    }
+
+                    .total-cost-display .total-amount {
+                        font-size: 14px;
+                        font-weight: bold;
+                    }
+
+                    /* Category left-border accents */
+                    .diagram-node[data-category="Compute"] { border-left-color: #107C10; }
+                    .diagram-node[data-category="Networking"] { border-left-color: #00485B; }
+                    .diagram-node[data-category="Storage"] { border-left-color: #0078D4; }
+                    .diagram-node[data-category="Databases"] { border-left-color: #E81123; }
+                    .diagram-node[data-category="Security"] { border-left-color: #FF8C00; }
+                    .diagram-node[data-category="Monitoring + Management"] { border-left-color: #8661C5; }
+                    .diagram-node[data-category="Containers"] { border-left-color: #00BCF2; }
+                    .diagram-node[data-category="Web"] { border-left-color: #FFB900; }
+                    .diagram-node[data-category="Identity"] { border-left-color: #5C2D91; }
+                    .diagram-node[data-category="Analytics"] { border-left-color: #0099BC; }
+                    .diagram-node[data-category="AI + Machine Learning"] { border-left-color: #7719AA; }
+                    .diagram-node[data-category="Integration"] { border-left-color: #CA5010; }
+                    .diagram-node[data-category="DevOps"] { border-left-color: #038387; }
+                    .diagram-node[data-category="General"] { border-left-color: #69797E; }
+
+                    .connection {
+                        position: absolute;
+                        pointer-events: none;
+                    }
+
+                    .connection-line {
+                        stroke-width: 1;
+                        stroke: #A19F9D;
+                        stroke-opacity: 0.5;
+                        stroke-dasharray: none;
+                        fill: none;
+                    }
+
+                    .connection-line.dashed {
+                        stroke-dasharray: 6, 4;
+                    }
+
+                    .connection-line.dotted {
+                        stroke-dasharray: 2, 4;
+                    }
+
+                    .connection-line.containment {
+                        stroke: #C8C6C4;
+                        stroke-dasharray: 6, 4;
+                        stroke-width: 1;
+                        stroke-opacity: 0.4;
+                    }
+
+                    .connection-arrow {
+                        fill: #A19F9D;
+                        fill-opacity: 0.4;
+                    }
+
+                    .legend {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 6px;
+                        margin-top: 8px;
+                    }
+
+                    .legend-item {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                        font-size: 9px;
+                    }
+
+                    .legend-color {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 2px;
+                    }
+
+                    .controls {
+                        position: fixed;
+                        bottom: 20px;
+                        right: 20px;
+                        display: flex;
+                        flex-direction: column;
+                        gap: 10px;
+                    }
+
+                    .control-btn {
+                        width: 40px;
+                        height: 40px;
+                        border-radius: 50%;
+                        background: var(--vscode-button-background);
+                        color: var(--vscode-button-foreground);
+                        border: none;
+                        cursor: pointer;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+                        transition: background 0.2s;
+                    }
+
+                    .control-btn:hover {
+                        background: var(--vscode-button-hoverBackground);
+                    }
+
+                    .tooltip {
+                        position: absolute;
+                        background: var(--vscode-editorWidget-background);
+                        border: 1px solid var(--vscode-widget-border);
+                        border-radius: 6px;
+                        padding: 12px;
+                        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+                        max-width: 300px;
+                        z-index: 10000;
+                        pointer-events: none;
+                        opacity: 0;
+                        transition: opacity 0.2s;
+                    }
+
+                    .tooltip-title {
+                        font-weight: bold;
+                        margin-bottom: 5px;
+                        color: var(--azure-blue);
+                    }
+
+                    .tooltip-detail {
+                        font-size: 11px;
+                        margin: 3px 0;
+                        display: flex;
+                        justify-content: space-between;
+                    }
+
+                    .tooltip-label {
+                        color: var(--vscode-descriptionForeground);
+                    }
+
+                    .tooltip-value {
+                        font-family: 'Monaco', 'Courier New', monospace;
+                    }
+
+                    .search-box {
+                        margin-bottom: 10px;
+                    }
+
+                    .search-input {
+                        width: 100%;
+                        padding: 5px 8px;
+                        background: var(--vscode-input-background);
+                        color: var(--vscode-input-foreground);
+                        border: 1px solid var(--vscode-input-border);
+                        border-radius: 3px;
+                        font-size: 10px;
+                        box-sizing: border-box;
+                    }
+
+                    /* Group container styles */
+                    .diagram-node.group-container {
+                        border: 1.5px solid rgba(0, 0, 0, 0.10);
+                        border-left: 3px solid rgba(0, 120, 212, 0.5);
+                        border-radius: 8px;
+                        background: rgba(243, 242, 241, 0.30);
+                        box-shadow: none;
+                        padding: 0;
+                        flex-direction: column;
+                        align-items: flex-start;
+                        justify-content: flex-start;
+                    }
+
+                    .diagram-node.group-container:hover {
+                        box-shadow: none;
+                        border-color: rgba(0, 0, 0, 0.15);
+                    }
+
+                    .diagram-node.group-container .node-label {
+                        position: absolute;
+                        top: 0;
+                        left: 0;
+                        right: 0;
+                        background: rgba(0, 120, 212, 0.06);
+                        border-radius: 7px 7px 0 0;
+                        padding: 4px 12px;
+                        margin: 0;
+                        width: auto;
+                        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+                    }
+
+                    /* Zone-specific tint classes */
+                    .zone-networking {
+                        background: rgba(0, 72, 91, 0.06) !important;
+                        border-color: rgba(0, 72, 91, 0.18) !important;
+                    }
+                    .zone-data {
+                        background: rgba(0, 120, 212, 0.06) !important;
+                        border-color: rgba(0, 120, 212, 0.18) !important;
+                    }
+                    .zone-application {
+                        background: rgba(16, 124, 16, 0.06) !important;
+                        border-color: rgba(16, 124, 16, 0.18) !important;
+                    }
+                    .zone-security {
+                        background: rgba(255, 140, 0, 0.06) !important;
+                        border-color: rgba(255, 140, 0, 0.18) !important;
+                    }
+                    .zone-management {
+                        background: rgba(134, 97, 197, 0.06) !important;
+                        border-color: rgba(134, 97, 197, 0.18) !important;
+                    }
+                    .zone-identity {
+                        background: rgba(92, 45, 145, 0.06) !important;
+                        border-color: rgba(92, 45, 145, 0.18) !important;
+                    }
+                    .zone-edge {
+                        background: rgba(0, 0, 0, 0.03) !important;
+                        border-color: rgba(0, 0, 0, 0.10) !important;
+                    }
+                    .zone-dmz {
+                        background: rgba(255, 0, 0, 0.04) !important;
+                        border-color: rgba(255, 0, 0, 0.12) !important;
+                    }
+                    .zone-presentation {
+                        background: rgba(104, 33, 122, 0.05) !important;
+                        border-color: rgba(104, 33, 122, 0.14) !important;
+                    }
+
+                    .diagram-node.level-0 {
+                        /* Top-level nodes */
+                        z-index: 10;
+                    }
+
+                    .diagram-node.level-1 {
+                        /* Nodes inside groups */
+                        z-index: 20;
+                        border-width: 1.5px;
+                    }
+
+                    .diagram-node.level-2 {
+                        /* Nested nodes */
+                        z-index: 30;
+                        border-width: 1px;
+                    }
+
+                    /* Category / zone / layer headers */
+                    .diagram-node.category-header {
+                        background: transparent;
+                        border: none;
+                        border-left: none;
+                        box-shadow: none;
+                        height: 24px !important;
+                        justify-content: flex-start;
+                        padding-left: 4px;
+                    }
+
+                    .diagram-node.category-header:hover {
+                        box-shadow: none;
+                        border-color: transparent;
+                    }
+
+                    .diagram-node.category-header .node-name {
+                        font-size: 11px;
+                        font-weight: 600;
+                        color: #605E5C;
+                        letter-spacing: 0.3px;
+                        text-transform: uppercase;
+                    }
+
+                    .diagram-node.category-header .node-icon {
+                        display: none;
+                    }
+
+                    .diagram-node.category-header .node-type {
+                        display: none;
+                    }
+
+                    /* Responsive badge positioning for small nodes */
+                    .diagram-node.small-node .node-badges {
+                        top: -3px;
+                        right: -3px;
+                    }
+
+                    .diagram-node.small-node .security-badge {
+                        width: 8px;
+                        height: 8px;
+                        font-size: 3px;
+                    }
+
+                    .diagram-node.small-node .cost-badge,
+                    .diagram-node.small-node .tag-badge {
+                        padding: 0 2px;
+                        font-size: 4px;
+                    }
+                        </style>
+
         </head>
         <body>
             <div class="app-container">
@@ -990,14 +1392,37 @@ function getWebviewContent(
                 const ni = resource.networkInfo || {};
                 const attr = resource.attributes || {};
 
-                // VNet: address space
+                // Skip CIDR for VNet and Subnet when node already has cidrRange
+                // (CIDR will be shown separately as cidrHtml)
+                if ((node.type === 'azurerm_virtual_network' || node.type === 'azurerm_subnet') && node.cidrRange) {
+                    // Return other information instead of CIDR
+                    if (node.type === 'azurerm_virtual_network') {
+                        // For VNet, you could show location or other details
+                        if (attr.location) return attr.location;
+                        if (attr.resource_group_name) return 'RG: ' + attr.resource_group_name;
+                        return '';
+                    }
+                    if (node.type === 'azurerm_subnet') {
+                        // For Subnet, you could show other attributes
+                        if (attr.service_endpoints) {
+                            const endpoints = Array.isArray(attr.service_endpoints) ? 
+                                attr.service_endpoints.join(', ') : attr.service_endpoints;
+                            return 'Endpoints: ' + endpoints;
+                        }
+                        if (attr.enforce_private_link_endpoint_network_policies) return 'Private Link';
+                        return '';
+                    }
+                    return '';
+                }
+
+                // VNet: address space (only if not already in node.cidrRange)
                 if (node.type === 'azurerm_virtual_network') {
                     if (attr.address_space) {
                         const space = Array.isArray(attr.address_space) ? attr.address_space.join(', ') : attr.address_space;
                         return space;
                     }
                 }
-                // Subnet: CIDR prefix
+                // Subnet: CIDR prefix (only if not already in node.cidrRange)
                 if (node.type === 'azurerm_subnet') {
                     if (ni.addressPrefix) return ni.addressPrefix.split(' in ')[0];
                     if (attr.address_prefixes) {
@@ -1105,6 +1530,45 @@ function getWebviewContent(
                 nodeEl.style.width = \`\${node.width}px\`;
                 nodeEl.style.height = \`\${node.height}px\`;
 
+                // Create badges container
+                const badgesContainer = document.createElement('div');
+                badgesContainer.className = 'node-badges';
+                
+                // Add security badges
+                if (node.securityBadges && node.securityBadges.length > 0) {
+                    // Sort by severity (critical first)
+                    const severityOrder = { 'critical': 0, 'high': 1, 'medium': 2, 'low': 3, 'info': 4 };
+                    const sortedBadges = [...node.securityBadges].sort((a, b) => 
+                        severityOrder[a.severity] - severityOrder[b.severity]
+                    );
+                    
+                    // Show only the highest severity badge on the node
+                    const highestSeverityBadge = sortedBadges[0];
+                    const badgeEl = document.createElement('div');
+                    badgeEl.className = \`security-badge \${highestSeverityBadge.severity}\`;
+                    badgeEl.title = highestSeverityBadge.tooltip || highestSeverityBadge.title;
+                    badgeEl.textContent = highestSeverityBadge.icon || '!';
+                    badgesContainer.appendChild(badgeEl);
+                }
+                
+                // Add cost badge
+                if (node.costBadge) {
+                    const costBadge = document.createElement('div');
+                    costBadge.className = \`cost-badge \${node.costBadge.isHighCost ? 'high-cost' : ''}\`;
+                    costBadge.title = \`Monthly cost: \${node.costBadge.formattedCost} (\${node.costBadge.tier})\`;
+                    costBadge.textContent = node.costBadge.formattedCost;
+                    badgesContainer.appendChild(costBadge);
+                }
+                
+                // Add tag compliance badge
+                if (node.tagBadge && !node.tagBadge.hasRequiredTags) {
+                    const tagBadge = document.createElement('div');
+                    tagBadge.className = 'tag-badge';
+                    tagBadge.title = node.tagBadge.tooltip || \`Missing \${node.tagBadge.missingCount} required tag(s)\`;
+                    tagBadge.textContent = \`Tags: \${node.tagBadge.missingCount}\`;
+                    badgesContainer.appendChild(tagBadge);
+                }
+
                 // Special rendering for different node types
                 if (node.isGroupContainer) {
                     nodeEl.innerHTML = \`
@@ -1122,14 +1586,31 @@ function getWebviewContent(
                     const displayName = node.displayName || node.name;
                     const detail = getNodeDetail(node, resource);
                     const detailHtml = detail ? \`<div class="node-detail" title="\${detail}">\${detail}</div>\` : '';
+                    
+                    // Check if we have SKU label
+                    const skuHtml = node.skuLabel ? \`<div class="sku-label">\${node.skuLabel}</div>\` : '';
+                    
+                    // Check for CIDR range
+                    const cidrHtml = node.cidrRange ? \`<div class="node-detail">\${node.cidrRange}</div>\` : '';
+                    
+                    // Check for private endpoint indicator
+                    const privateEndpointHtml = node.hasPrivateEndpoint ? 
+                        '<div style="font-size: 8px; color: #107c10; margin-top: 1px;">🔒 Private Endpoint</div>' : '';
+                    
                     nodeEl.innerHTML = \`
                         <img src="\${iconMap[node.id]}" class="node-icon" alt="\${node.type}">
                         <div class="node-label">
                             <div class="node-name">\${displayName}</div>
                             \${detailHtml}
+                            \${cidrHtml}
+                            \${skuHtml}
+                            \${privateEndpointHtml}
                         </div>
                     \`;
                 }
+                
+                // Add badges container to node
+                nodeEl.appendChild(badgesContainer);
                 
                 // Add event listeners
                 nodeEl.addEventListener('click', (e) => {
@@ -1279,6 +1760,130 @@ function getWebviewContent(
                         <span class="tooltip-value">\${resourceInfo.category}</span>
                     </div>
                 \`;
+                
+                // Add cost information
+                if (node.costBadge) {
+                    html += \`
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">Monthly Cost:</span>
+                            <span class="tooltip-value" style="color: \${node.costBadge.isHighCost ? '#e81123' : '#107c10'}; font-weight: bold;">
+                                \${node.costBadge.formattedCost}
+                            </span>
+                        </div>
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">Pricing Tier:</span>
+                            <span class="tooltip-value">\${node.costBadge.tier}</span>
+                        </div>
+                    \`;
+                }
+                
+                // Add SKU information
+                if (node.skuLabel) {
+                    html += \`
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">SKU:</span>
+                            <span class="tooltip-value">\${node.skuLabel}</span>
+                        </div>
+                    \`;
+                }
+                
+                // Add tag compliance information
+                if (node.tagBadge) {
+                    html += \`
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">Tag Compliance:</span>
+                            <span class="tooltip-value" style="color: \${node.tagBadge.hasRequiredTags ? '#107c10' : '#e81123'}">
+                                \${node.tagBadge.hasRequiredTags ? 'Compliant' : \`\${node.tagBadge.missingCount} tags missing\`}
+                            </span>
+                        </div>
+                    \`;
+                    if (!node.tagBadge.hasRequiredTags && node.tagBadge.missingTags) {
+                        html += \`
+                            <div class="tooltip-detail">
+                                <span class="tooltip-label">Missing Tags:</span>
+                                <span class="tooltip-value">\${node.tagBadge.missingTags.join(', ')}</span>
+                            </div>
+                        \`;
+                    }
+                }
+                
+                // Add security information
+                if (node.securityBadges && node.securityBadges.length > 0) {
+                    const severityCounts = {};
+                    node.securityBadges.forEach(badge => {
+                        severityCounts[badge.severity] = (severityCounts[badge.severity] || 0) + 1;
+                    });
+                    
+                    html += \`<div class="tooltip-detail" style="margin-top: 8px; border-top: 1px solid #eee; padding-top: 8px;">
+                        <span class="tooltip-label">Security Issues:</span>
+                        <span class="tooltip-value">\${node.securityBadges.length} total</span>
+                    </div>\`;
+                    
+                    Object.entries(severityCounts).forEach(([severity, count]) => {
+                        const severityColors = {
+                            'critical': '#e81123',
+                            'high': '#ff8c00',
+                            'medium': '#ffb900',
+                            'low': '#107c10',
+                            'info': '#0078d4'
+                        };
+                        html += \`
+                            <div class="tooltip-detail">
+                                <span class="tooltip-label" style="color: \${severityColors[severity] || '#605e5c'}">\${severity}:</span>
+                                <span class="tooltip-value">\${count} issues</span>
+                            </div>
+                        \`;
+                    });
+                    
+                    // Add security score if available
+                    if (node.overallSecurityScore !== undefined) {
+                        html += \`
+                            <div class="tooltip-detail">
+                                <span class="tooltip-label">Security Score:</span>
+                                <span class="tooltip-value">\${node.overallSecurityScore}/100</span>
+                            </div>
+                        \`;
+                    }
+                }
+                
+                // Add network information
+                if (node.cidrRange) {
+                    html += \`
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">CIDR Range:</span>
+                            <span class="tooltip-value">\${node.cidrRange}</span>
+                        </div>
+                    \`;
+                }
+                
+                if (node.hasPrivateEndpoint) {
+                    html += \`
+                        <div class="tooltip-detail">
+                            <span class="tooltip-label">Private Endpoint:</span>
+                            <span class="tooltip-value" style="color: #107c10">✓ Configured</span>
+                        </div>
+                    \`;
+                }
+                
+                // Add data flows
+                if (node.dataFlows && node.dataFlows.length > 0) {
+                    html += \`<div class="tooltip-detail" style="margin-top: 8px; border-top: 1px solid #eee; padding-top: 8px;">
+                        <span class="tooltip-label">Data Flows:</span>
+                        <span class="tooltip-value">\${node.dataFlows.length} outgoing</span>
+                    </div>\`;
+                    
+                    node.dataFlows.forEach(flow => {
+                        const targetNode = diagramNodes.find(n => n.id === flow.targetId);
+                        if (targetNode) {
+                            html += \`
+                                <div class="tooltip-detail">
+                                    <span class="tooltip-label">→ \${flow.label || 'Flow'}:</span>
+                                    <span class="tooltip-value">\${targetNode.name}</span>
+                                </div>
+                            \`;
+                        }
+                    });
+                }
                 
                 // Add level information
                 if (node.level !== undefined) {
@@ -1642,7 +2247,9 @@ function getWebviewContent(
                     resourceCount: resources.length,
                     nodeCount: diagramNodes.length,
                     nodesWithConnections: diagramNodes.filter(n => n.connections && n.connections.length > 0).length,
-                    groupNodes: diagramNodes.filter(n => n.isGroupContainer).length
+                    groupNodes: diagramNodes.filter(n => n.isGroupContainer).length,
+                    nodesWithCostBadges: diagramNodes.filter(n => n.costBadge).length,
+                    nodesWithSecurityBadges: diagramNodes.filter(n => n.securityBadges && n.securityBadges.length > 0).length
                 }
             });
         </script>

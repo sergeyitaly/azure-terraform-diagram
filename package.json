@@ -1,8 +1,8 @@
 {
   "name": "azure-terraform-diagram",
   "displayName": "Azure Terraform Diagram",
-  "description": "Generate Microsoft Azure-style infrastructure diagrams from Terraform projects",
-  "version": "0.2.6",
+  "description": "Generate Microsoft Azure-style infrastructure diagrams from Terraform projects with DevOps insights",
+  "version": "0.3.0",
   "publisher": "SerhiiVoinolovych",
   "icon": "media/icon.png",
   "repository": {
@@ -15,14 +15,21 @@
   },
   "categories": [
     "Visualization",
-    "Other"
+    "Other",
+    "Azure",
+    "DevOps"
   ],
   "keywords": [
     "terraform",
     "azure",
     "diagram",
     "infrastructure",
-    "architecture"
+    "architecture",
+    "devops",
+    "cost",
+    "security",
+    "compliance",
+    "monitoring"
   ],
   "activationEvents": [],
   "main": "./out/extension.js",
@@ -39,8 +46,8 @@
         "category": "Azure Terraform"
       },
       {
-        "command": "azure-terraform-diagram.export",
-        "title": "Export Diagram as SVG",
+        "command": "azure-terraform-diagram.exportPNG",
+        "title": "Export Diagram as PNG",
         "category": "Azure Terraform"
       }
     ],
@@ -58,8 +65,8 @@
           "when": "workspaceFolderCount > 0"
         },
         {
-          "command": "azure-terraform-diagram.export",
-          "when": "azure-terraform-diagram.diagramOpen"
+          "command": "azure-terraform-diagram.exportPNG",
+          "when": "workspaceFolderCount > 0"
         }
       ]
     },
@@ -97,6 +104,71 @@
           "type": "boolean",
           "default": true,
           "description": "When true, generates diagram for the folder containing the saved .tf file. When false, generates for entire workspace."
+        },
+        
+        "azureTerraformDiagram.security.showBadges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show security assessment badges on diagram nodes"
+        },
+        "azureTerraformDiagram.security.severityThreshold": {
+          "type": "string",
+          "default": "medium",
+          "enum": ["critical", "high", "medium", "low", "info"],
+          "description": "Minimum severity level to show security badges"
+        },
+        
+        "azureTerraformDiagram.cost.showEstimates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show monthly cost estimates on diagram nodes"
+        },
+        "azureTerraformDiagram.cost.currency": {
+          "type": "string",
+          "default": "USD",
+          "enum": ["USD", "EUR", "GBP", "JPY", "CAD", "AUD"],
+          "description": "Currency to use for cost estimates"
+        },
+        
+        "azureTerraformDiagram.showSKULabels": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show SKU/tier information on diagram nodes"
+        },
+        
+        "azureTerraformDiagram.compliance.showTagBadges": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show tag compliance badges on diagram nodes"
+        },
+        "azureTerraformDiagram.compliance.requiredTags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["environment", "owner"],
+          "description": "List of required tags for tag compliance checking"
+        },
+        
+        "azureTerraformDiagram.network.showCIDR": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show CIDR ranges for network resources"
+        },
+        "azureTerraformDiagram.network.showPrivateEndpoints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show private endpoint indicators on applicable resources"
+        },
+        "azureTerraformDiagram.network.showDataFlows": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show data flow connections between resources"
+        },
+        
+        "azureTerraformDiagram.layout.mode": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "hierarchical", "network", "zones"],
+          "description": "Layout mode for the diagram (auto, hierarchical, network, or zones)"
         }
       }
     }

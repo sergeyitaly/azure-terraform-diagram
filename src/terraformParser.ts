@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Export the interfaces that the diagram layout code expects
 export interface TerraformResource {
     type: string;
     name: string;
@@ -13,6 +14,10 @@ export interface TerraformResource {
     securityRules?: SecurityRule[];
     networkInfo?: NetworkInfo;
     tags?: Record<string, string>;
+    resourceGroup?: string;
+    hierarchyLevel?: number;
+    parentResource?: string;
+    childResources?: TerraformResource[];
 }
 
 export interface SecurityRule {
@@ -25,6 +30,7 @@ export interface SecurityRule {
     destinationPortRange?: string;
     sourceAddressPrefix?: string;
     destinationAddressPrefix?: string;
+    description?: string;
 }
 
 export interface NetworkInfo {
@@ -37,13 +43,99 @@ export interface NetworkInfo {
     endpoints?: string[];
 }
 
+// Azure resource type categories (matching what the diagram expects)
+export type AzureResourceCategory = 
+    | 'Compute'
+    | 'Networking'
+    | 'Storage'
+    | 'Databases'
+    | 'Security'
+    | 'Monitoring + Management'
+    | 'General'
+    | 'Analytics'
+    | 'AI + Machine Learning'
+    | 'Integration'
+    | 'Identity'
+    | 'Web'
+    | 'Containers'
+    | 'DevOps';
+
+// Resource hierarchy types
+export interface ResourceHierarchy {
+    rootResources: TerraformResource[];
+    groupedResources: Map<number, TerraformResource[]>; 
+    parentChildMap: Map<string, string[]>;
+    hierarchyLevels: Map<string, number>;
+}
+
+// Icon mapper for Azure resources
+export class AzureIconMapper {
+    private static readonly RESOURCE_MAP: Record<string, { category: AzureResourceCategory; icon: string; hierarchyLevel: number }> = {
+        // Level 1: Foundation resources
+        'azurerm_resource_group': { category: 'General', icon: 'resource-group', hierarchyLevel: 1 },
+        'azurerm_virtual_network': { category: 'Networking', icon: 'vnet', hierarchyLevel: 1 },
+        
+        // Level 2: Network infrastructure
+        'azurerm_subnet': { category: 'Networking', icon: 'subnet', hierarchyLevel: 2 },
+        'azurerm_route_table': { category: 'Networking', icon: 'route-table', hierarchyLevel: 2 },
+        'azurerm_network_security_group': { category: 'Security', icon: 'nsg', hierarchyLevel: 2 },
+        'azurerm_public_ip': { category: 'Networking', icon: 'public-ip', hierarchyLevel: 2 },
+        
+        // Level 3: Compute resources and dependencies
+        'azurerm_network_interface': { category: 'Networking', icon: 'nic', hierarchyLevel: 3 },
+        'azurerm_linux_virtual_machine': { category: 'Compute', icon: 'vm', hierarchyLevel: 3 },
+        'azurerm_windows_virtual_machine': { category: 'Compute', icon: 'vm', hierarchyLevel: 3 },
+        'azurerm_virtual_machine': { category: 'Compute', icon: 'vm', hierarchyLevel: 3 },
+        'azurerm_app_service_plan': { category: 'Web', icon: 'app-service-plan', hierarchyLevel: 3 },
+        'azurerm_kubernetes_cluster': { category: 'Containers', icon: 'aks', hierarchyLevel: 3 },
+        
+        // Level 4: Application/services
+        'azurerm_app_service': { category: 'Web', icon: 'app-service', hierarchyLevel: 4 },
+        'azurerm_function_app': { category: 'Compute', icon: 'function-app', hierarchyLevel: 4 },
+        'azurerm_container_group': { category: 'Containers', icon: 'container', hierarchyLevel: 4 },
+        
+        // Level 5: Data storage
+        'azurerm_storage_account': { category: 'Storage', icon: 'storage-account', hierarchyLevel: 5 },
+        'azurerm_sql_server': { category: 'Databases', icon: 'sql-server', hierarchyLevel: 5 },
+        'azurerm_cosmosdb_account': { category: 'Databases', icon: 'cosmosdb', hierarchyLevel: 5 },
+        'azurerm_key_vault': { category: 'Security', icon: 'key-vault', hierarchyLevel: 5 },
+        
+        // Level 6: Advanced services
+        'azurerm_application_gateway': { category: 'Networking', icon: 'app-gateway', hierarchyLevel: 6 },
+        'azurerm_firewall': { category: 'Security', icon: 'firewall', hierarchyLevel: 6 },
+        'azurerm_bastion_host': { category: 'Security', icon: 'bastion', hierarchyLevel: 6 },
+        'azurerm_redis_cache': { category: 'Databases', icon: 'redis', hierarchyLevel: 6 },
+        
+        // Monitoring & Management
+        'azurerm_monitor_action_group': { category: 'Monitoring + Management', icon: 'action-group', hierarchyLevel: 7 },
+        'azurerm_log_analytics_workspace': { category: 'Monitoring + Management', icon: 'log-analytics', hierarchyLevel: 7 },
+        'azurerm_application_insights': { category: 'Monitoring + Management', icon: 'app-insights', hierarchyLevel: 7 },
+        
+        // Default fallback
+        'default': { category: 'General', icon: 'resource', hierarchyLevel: 99 }
+    };
+    
+    static getResourceInfo(resourceType: string): { category: AzureResourceCategory; icon: string; hierarchyLevel: number } {
+        return this.RESOURCE_MAP[resourceType] || this.RESOURCE_MAP.default;
+    }
+    
+    static getResourceCategory(resourceType: string): AzureResourceCategory {
+        return this.getResourceInfo(resourceType).category;
+    }
+    
+    static getResourceHierarchyLevel(resourceType: string): number {
+        return this.getResourceInfo(resourceType).hierarchyLevel;
+    }
+}
+
 export class TerraformParser {
     /**
-     * Parse Terraform files in a workspace/folder
+     * Parse Terraform files in a workspace/folder and organize by hierarchy
      * @param workspacePath The path to scan for Terraform files
-     * @param recursive Whether to scan subdirectories (default: false for folder-specific generation)
+     * @param recursive Whether to scan subdirectories
+     * @param organizeHierarchy Whether to organize resources by hierarchy (default: true)
      */
-    async parseWorkspace(workspacePath: string, recursive: boolean = false): Promise<TerraformResource[]> {
+    async parseWorkspace(workspacePath: string, recursive: boolean = false, organizeHierarchy: boolean = true): Promise<TerraformResource[]> {
         const tfFiles = this.findTerraformFiles(workspacePath, recursive);
         const resources: TerraformResource[] = [];
 
@@ -63,22 +155,237 @@ export class TerraformParser {
 
         this.extractDependencies(resources);
         this.extractTagsAndModuleInfo(resources);
+        this.extractResourceGroups(resources);
+
+        if (organizeHierarchy) {
+            this.organizeResourceHierarchy(resources);
+        }
 
         console.log(`[TerraformParser] Total resources parsed: ${resources.length}`);
         return resources;
     }
 
     /**
+     * Organize resources by hierarchy level and parent-child relationships
+     */
+    private organizeResourceHierarchy(resources: TerraformResource[]): void {
+        // First, set hierarchy level based on resource type
+        resources.forEach(resource => {
+            resource.hierarchyLevel = AzureIconMapper.getResourceHierarchyLevel(resource.type);
+        });
+
+        // Sort resources by hierarchy level
+        resources.sort((a, b) => (a.hierarchyLevel || 99) - (b.hierarchyLevel || 99));
+
+        // Build parent-child relationships based on dependencies
+        resources.forEach(resource => {
+            resource.childResources = [];
+        });
+
+        // Find parent resources for each resource
+        resources.forEach(resource => {
+            const parent = this.findParentResource(resource, resources);
+            if (parent) {
+                resource.parentResource = `${parent.type}_${parent.name}`;
+                if (!parent.childResources) {
+                    parent.childResources = [];
+                }
+                parent.childResources.push(resource);
+            }
+        });
+    }
+
+    /**
+     * Find parent resource based on dependencies and hierarchy
+     */
+    private findParentResource(resource: TerraformResource, allResources: TerraformResource[]): TerraformResource | undefined {
+        // Resource Group is always a parent if referenced
+        const rgDependency = resource.dependencies.find(dep => 
+            dep.startsWith('azurerm_resource_group_')
+        );
+        if (rgDependency) {
+            const rgName = rgDependency.replace('azurerm_resource_group_', '');
+            return allResources.find(r => 
+                r.type === 'azurerm_resource_group' && r.name === rgName
+            );
+        }
+
+        // Check for subnet -> vnet relationship
+        if (resource.type === 'azurerm_subnet') {
+            const vnetMatch = resource.attributes?.virtual_network_name?.toString().match(/azurerm_virtual_network\.([^.]+)/);
+            if (vnetMatch) {
+                const vnetName = vnetMatch[1];
+                return allResources.find(r => 
+                    r.type === 'azurerm_virtual_network' && r.name === vnetName
+                );
+            }
+        }
+
+        // Check for NIC -> subnet relationship
+        if (resource.type === 'azurerm_network_interface') {
+            const subnetMatch = resource.attributes?.ip_configuration?.[0]?.subnet_id?.toString().match(/azurerm_subnet\.([^.]+)/);
+            if (subnetMatch) {
+                const subnetName = subnetMatch[1];
+                return allResources.find(r => 
+                    r.type === 'azurerm_subnet' && r.name === subnetName
+                );
+            }
+        }
+
+        // Check for VM -> NIC relationship
+        if (resource.type.includes('virtual_machine')) {
+            const nicMatch = resource.attributes?.network_interface_ids?.[0]?.toString().match(/azurerm_network_interface\.([^.]+)/);
+            if (nicMatch) {
+                const nicName = nicMatch[1];
+                return allResources.find(r => 
+                    r.type === 'azurerm_network_interface' && r.name === nicName
+                );
+            }
+        }
+
+        // App Service -> App Service Plan
+        if (resource.type === 'azurerm_app_service') {
+            const aspMatch = resource.attributes?.app_service_plan_id?.toString().match(/azurerm_app_service_plan\.([^.]+)/);
+            if (aspMatch) {
+                const aspName = aspMatch[1];
+                return allResources.find(r => 
+                    r.type === 'azurerm_app_service_plan' && r.name === aspName
+                );
+            }
+        }
+
+        // SQL Database -> SQL Server
+        if (resource.type === 'azurerm_sql_database') {
+            const serverMatch = resource.attributes?.server_name?.toString().match(/azurerm_sql_server\.([^.]+)/);
+            if (serverMatch) {
+                const serverName = serverMatch[1];
+                return allResources.find(r => 
+                    r.type === 'azurerm_sql_server' && r.name === serverName
+                );
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Extract resource group information for each resource
+     */
+    private extractResourceGroups(resources: TerraformResource[]): void {
+        // First, find all resource groups
+        const resourceGroups = new Map<string, TerraformResource>();
+        resources.forEach(resource => {
+            if (resource.type === 'azurerm_resource_group') {
+                resourceGroups.set(resource.name, resource);
+            }
+        });
+
+        // Assign resource groups to other resources
+        resources.forEach(resource => {
+            if (resource.type === 'azurerm_resource_group') {
+                resource.resourceGroup = resource.name;
+            } else {
+                // Try to extract from attributes
+                const rgName = this.extractResourceGroupFromAttributes(resource);
+                if (rgName && resourceGroups.has(rgName)) {
+                    resource.resourceGroup = rgName;
+                }
+            }
+        });
+    }
+
+    /**
+     * Extract resource group name from resource attributes
+     */
+    private extractResourceGroupFromAttributes(resource: TerraformResource): string | undefined {
+        const attrs = resource.attributes || {};
+        
+        // Check direct attribute
+        if (attrs.resource_group_name) {
+            const rgName = attrs.resource_group_name;
+            
+            // Handle references like azurerm_resource_group.main.name
+            if (typeof rgName === 'string') {
+                const match = rgName.match(/azurerm_resource_group\.([^.]+)/);
+                if (match) return match[1];
+                
+                // Handle var references
+                if (rgName.startsWith('var.')) return rgName.replace('var.', '');
+                
+                // Handle local references
+                if (rgName.startsWith('local.')) return rgName.replace('local.', '');
+                
+                return rgName;
+            }
+        }
+
+        // Check location for resource group hints
+        if (attrs.location) {
+            // Some resources might infer resource group from location pattern
+            const location = attrs.location.toString();
+            if (location.includes('-rg-')) {
+                return location.split('-rg-')[1];
+            }
+        }
+
+        return undefined;
+    }
+
+    /**
+     * Group resources by hierarchy level
+     */
+    groupResourcesByHierarchy(resources: TerraformResource[]): Map<number, TerraformResource[]> {
+        const grouped = new Map<number, TerraformResource[]>();
+        
+        resources.forEach(resource => {
+            const level = resource.hierarchyLevel || 99;
+            if (!grouped.has(level)) {
+                grouped.set(level, []);
+            }
+            grouped.get(level)!.push(resource);
+        });
+        
+        return grouped;
+    }
+
+    /**
+     * Get resource hierarchy tree
+     */
+    getResourceHierarchy(resources: TerraformResource[]): ResourceHierarchy {
+        const rootResources = resources.filter(r => !r.parentResource);
+        const groupedResources = this.groupResourcesByHierarchy(resources); // This returns Map<number, TerraformResource[]>
+        const parentChildMap = new Map<string, string[]>();
+        const hierarchyLevels = new Map<string, number>();
+
+        // Build parent-child map
+        resources.forEach(resource => {
+            const resourceId = `${resource.type}_${resource.name}`;
+            hierarchyLevels.set(resourceId, resource.hierarchyLevel || 99);
+            
+            if (resource.parentResource) {
+                if (!parentChildMap.has(resource.parentResource)) {
+                    parentChildMap.set(resource.parentResource, []);
+                }
+                parentChildMap.get(resource.parentResource)!.push(resourceId);
+            }
+        });
+
+        return {
+            rootResources,
+            groupedResources,
+            parentChildMap,
+            hierarchyLevels
+        };
+    }
+
+
+    /**
      * Find Terraform files in a directory
-     * @param dir Directory to scan
-     * @param recursive Whether to scan all subdirectories
-     * For Terraform projects, we ALWAYS scan the 'modules' directory
      */
     private findTerraformFiles(dir: string, recursive: boolean = false): string[] {
         const files: string[] = [];
         const ignoredDirs = ['.terraform', '.git', 'node_modules', 'dist', 'build', 'target', 'k8s-manifests', 'application'];
 
-        // Helper to check if a path is inside a modules directory
         const isInsideModules = (dirPath: string): boolean => {
             const parts = dirPath.split(path.sep);
             return parts.includes('modules');
@@ -89,7 +396,6 @@ export class TerraformParser {
                 const items = fs.readdirSync(currentDir, { withFileTypes: true });
 
                 for (const item of items) {
-                    // Skip hidden files/directories
                     if (item.name.startsWith('.')) {
                         continue;
                     }
@@ -97,28 +403,22 @@ export class TerraformParser {
                     const fullPath = path.join(currentDir, item.name);
 
                     if (item.isDirectory()) {
-                        // Skip ignored directories
                         if (ignoredDirs.includes(item.name)) {
                             continue;
                         }
 
-                        // Always scan 'modules' directory and its subdirectories
                         if (item.name === 'modules') {
                             scanDirectory(fullPath, true);
                         } else if (isModulesDir || isInsideModules(currentDir)) {
-                            // We're inside modules, scan all subdirs (each module)
                             scanDirectory(fullPath, true);
                         } else if (recursive) {
-                            // Only recurse into other directories if recursive=true
                             scanDirectory(fullPath, false);
                         }
                     } else if (item.isFile()) {
-                        // Check for Terraform files
                         const isTerraformFile =
                             item.name.endsWith('.tf') ||
                             item.name.endsWith('.tf.json');
 
-                        // Include tfvars only from root
                         const isTfVars = item.name === 'terraform.tfvars' || item.name.endsWith('.tfvars');
 
                         if (isTerraformFile) {
@@ -182,7 +482,11 @@ export class TerraformParser {
                         dependencies: [],
                         securityRules: parseResult.securityRules,
                         networkInfo: parseResult.networkInfo,
-                        tags: parseResult.tags
+                        tags: parseResult.tags,
+                        resourceGroup: undefined,
+                        hierarchyLevel: AzureIconMapper.getResourceHierarchyLevel(type),
+                        parentResource: undefined,
+                        childResources: []
                     };
                     
                     resources.push(resource);
@@ -350,7 +654,6 @@ export class TerraformParser {
             
             // Ensure module property is set from file path
             if (!resource.module && resource.file) {
-                // Check for modules directory in path (handle both / and \ separators)
                 const normalizedPath = resource.file.replace(/\\/g, '/');
                 if (normalizedPath.includes('/modules/') || normalizedPath.startsWith('modules/')) {
                     const parts = normalizedPath.split('/');
@@ -365,7 +668,6 @@ export class TerraformParser {
             if (resource.tags?.environment) {
                 // Environment is already in tags
             } else if (resource.attributes?.environment) {
-                // Extract from attributes
                 if (!resource.tags) resource.tags = {};
                 resource.tags.environment = resource.attributes.environment.toString();
             }
@@ -806,7 +1108,7 @@ export class TerraformParser {
             }
         });
     }
-    
+
     async parseTerraformState(stateFilePath: string): Promise<TerraformResource[]> {
         try {
             const content = await fs.promises.readFile(stateFilePath, 'utf8');
@@ -827,7 +1129,11 @@ export class TerraformParser {
                                 dependencies: [],
                                 securityRules: [],
                                 networkInfo: {},
-                                tags: instance.attributes?.tags || {}
+                                tags: instance.attributes?.tags || {},
+                                resourceGroup: this.extractResourceGroupFromState(instance.attributes),
+                                hierarchyLevel: AzureIconMapper.getResourceHierarchyLevel(stateResource.type),
+                                parentResource: undefined,
+                                childResources: []
                             };
                             
                             resources.push(resource);
@@ -841,6 +1147,23 @@ export class TerraformParser {
             console.error(`Error parsing state file ${stateFilePath}:`, error);
             return [];
         }
+    }
+
+    private extractResourceGroupFromState(attributes: any): string | undefined {
+        if (attributes?.resource_group_name) {
+            return attributes.resource_group_name;
+        }
+        
+        // Extract from ID if available
+        if (attributes?.id) {
+            const id = attributes.id.toString();
+            const match = id.match(/resourceGroups\/([^\/]+)\//);
+            if (match) {
+                return match[1];
+            }
+        }
+        
+        return undefined;
     }
     
     getResourceTypes(resources: TerraformResource[]): Set<string> {
@@ -886,5 +1209,98 @@ export class TerraformParser {
         });
         
         return map;
+    }
+    
+    getResourcesByResourceGroup(resources: TerraformResource[]): Map<string, TerraformResource[]> {
+        const map = new Map<string, TerraformResource[]>();
+        
+        resources.forEach(resource => {
+            const rg = resource.resourceGroup || 'default';
+            if (!map.has(rg)) {
+                map.set(rg, []);
+            }
+            map.get(rg)!.push(resource);
+        });
+        
+        return map;
+    }
+    
+    getResourcesByHierarchyLevel(resources: TerraformResource[]): Map<number, TerraformResource[]> {
+        const map = new Map<number, TerraformResource[]>();
+        
+        resources.forEach(resource => {
+            const level = resource.hierarchyLevel || 99;
+            if (!map.has(level)) {
+                map.set(level, []);
+            }
+            map.get(level)!.push(resource);
+        });
+        
+        return map;
+    }
+
+    /**
+     * Get hierarchical tree of resources
+     */
+    getHierarchicalTree(resources: TerraformResource[]): {
+        rootResources: TerraformResource[];
+        nestedTree: Map<string, TerraformResource[]>;
+    } {
+        const rootResources = resources.filter(r => !r.parentResource);
+        const nestedTree = new Map<string, TerraformResource[]>();
+
+        resources.forEach(resource => {
+            if (resource.parentResource) {
+                if (!nestedTree.has(resource.parentResource)) {
+                    nestedTree.set(resource.parentResource, []);
+                }
+                nestedTree.get(resource.parentResource)!.push(resource);
+            }
+        });
+
+        return { rootResources, nestedTree };
+    }
+
+    /**
+     * Generate hierarchy summary for reporting
+     */
+    generateHierarchySummary(resources: TerraformResource[]): {
+        levels: Map<number, { count: number; types: string[] }>;
+        resourceGroups: Map<string, number>;
+        rootResources: number;
+        leafResources: number;
+        maxDepth: number;
+    } {
+        const levels = new Map<number, { count: number; types: string[] }>();
+        const resourceGroups = new Map<string, number>();
+        let rootResources = 0;
+        let leafResources = 0;
+        let maxDepth = 0;
+
+        // Count resources by hierarchy level
+        resources.forEach(resource => {
+            const level = resource.hierarchyLevel || 99;
+            if (!levels.has(level)) {
+                levels.set(level, { count: 0, types: [] });
+            }
+            const levelInfo = levels.get(level)!;
+            levelInfo.count++;
+            if (!levelInfo.types.includes(resource.type)) {
+                levelInfo.types.push(resource.type);
+            }
+
+            // Count by resource group
+            const rg = resource.resourceGroup || 'default';
+            resourceGroups.set(rg, (resourceGroups.get(rg) || 0) + 1);
+
+            // Count root and leaf resources
+            if (!resource.parentResource) rootResources++;
+            if (!resource.childResources || resource.childResources.length === 0) leafResources++;
+
+            // Track max depth
+            maxDepth = Math.max(maxDepth, level);
+        });
+
+        return { levels, resourceGroups, rootResources, leafResources, maxDepth };
     }
 }

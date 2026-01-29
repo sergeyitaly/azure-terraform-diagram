@@ -3,7 +3,14 @@ import * as path from 'path';
 import { DiagramNode } from './diagramLayout';
 import { TerraformResource } from './terraformParser';
 import { AzureIconMapper } from './azureIconMapper';
-
+import { 
+    DiagramConnection, 
+    SecurityPosture, 
+    CostEstimate, 
+    SKUInfo, 
+    TagCompliance,
+    EnhancedDiagramNode 
+} from './types';
 // Category colors for left border
 const CATEGORY_COLORS: Record<string, string> = {
     'Compute': '#107C10',
@@ -1030,6 +1037,9 @@ export class DiagramRenderer {
     </text>`;
         }
 
+        // Render DevOps badges
+        const badgeContent = this.renderDevOpsBadges(node, x, y);
+
         return `
   <g>
     <rect x="${x}" y="${y}" width="${node.width}" height="${node.height}"
@@ -1039,8 +1049,238 @@ export class DiagramRenderer {
     ${iconContent}
     <text x="${textX}" y="${nameY}" class="node-text-bold">
       ${this.escapeXml(this.truncateText(displayName, charLimit))}
-    </text>${detailElements}
+    </text>${detailElements}${badgeContent}
   </g>`;
+    }
+
+    /**
+     * Render DevOps feature badges (security, cost, tag compliance)
+     */
+    private renderDevOpsBadges(node: DiagramNode, x: number, y: number): string {
+        let badges = '';
+        let badgeX = x + node.width - 8; // Start from right edge
+        const badgeY = y + 4;
+        const badgeSize = 14;
+        const badgeSpacing = 16;
+
+        // Security badge (top-right corner)
+        if (node.securityBadges && node.securityBadges.length > 0) {
+            const topBadge = node.securityBadges[0];
+            const badgeColor = this.getSecurityBadgeColor(topBadge.severity);
+            const icon = this.getSecurityIcon(topBadge.severity);
+
+            badges += `
+    <g class="security-badge" transform="translate(${badgeX - badgeSize}, ${badgeY})">
+      <title>${this.escapeXml(topBadge.tooltip)}</title>
+      <circle cx="${badgeSize/2}" cy="${badgeSize/2}" r="${badgeSize/2}" fill="${badgeColor}" stroke="white" stroke-width="1"/>
+      <text x="${badgeSize/2}" y="${badgeSize/2 + 3}" text-anchor="middle" fill="white" font-size="8" font-weight="bold">${icon}</text>
+    </g>`;
+            badgeX -= badgeSpacing;
+        }
+
+        // Overall security score indicator
+        if (node.overallSecurityScore && !node.securityBadges) {
+            const scoreColor = this.getSecurityBadgeColor(node.overallSecurityScore);
+            badges += `
+    <g class="security-score" transform="translate(${badgeX - badgeSize}, ${badgeY})">
+      <title>Security: ${node.overallSecurityScore}</title>
+      <rect x="0" y="0" width="${badgeSize}" height="${badgeSize}" rx="2" fill="${scoreColor}" stroke="white" stroke-width="1"/>
+      <text x="${badgeSize/2}" y="${badgeSize/2 + 3}" text-anchor="middle" fill="white" font-size="7" font-weight="bold">S</text>
+    </g>`;
+            badgeX -= badgeSpacing;
+        }
+
+        // Tag compliance badge
+        if (node.tagBadge && !node.tagBadge.hasRequiredTags) {
+            const tagColor = node.tagBadge.missingCount > 2 ? '#D83B01' : '#FFB900'; // Red or Yellow
+            badges += `
+    <g class="tag-badge" transform="translate(${badgeX - badgeSize}, ${badgeY})">
+      <title>${this.escapeXml(node.tagBadge.tooltip)}</title>
+      <rect x="0" y="0" width="${badgeSize}" height="${badgeSize}" rx="2" fill="${tagColor}" stroke="white" stroke-width="1"/>
+      <text x="${badgeSize/2}" y="${badgeSize/2 + 3}" text-anchor="middle" fill="white" font-size="7" font-weight="bold">T</text>
+    </g>`;
+            badgeX -= badgeSpacing;
+        }
+
+        // Private endpoint indicator
+        if (node.hasPrivateEndpoint) {
+            badges += `
+    <g class="pe-badge" transform="translate(${badgeX - badgeSize}, ${badgeY})">
+      <title>Has Private Endpoint</title>
+      <rect x="0" y="0" width="${badgeSize}" height="${badgeSize}" rx="2" fill="#107C10" stroke="white" stroke-width="1"/>
+      <text x="${badgeSize/2}" y="${badgeSize/2 + 3}" text-anchor="middle" fill="white" font-size="8">🔒</text>
+    </g>`;
+            badgeX -= badgeSpacing;
+        }
+
+        // Cost badge (bottom-right corner)
+        if (node.costBadge && node.costBadge.monthlyCost > 0) {
+            const costY = y + node.height - 16;
+            const costColor = node.costBadge.isHighCost ? '#D83B01' : '#666666';
+            badges += `
+    <g class="cost-badge" transform="translate(${x + node.width - 50}, ${costY})">
+      <title>Estimated monthly cost: ${node.costBadge.formattedCost}</title>
+      <rect x="0" y="0" width="46" height="12" rx="2" fill="${costColor}" fill-opacity="0.1" stroke="${costColor}" stroke-width="0.5"/>
+      <text x="23" y="9" text-anchor="middle" fill="${costColor}" font-size="7" font-weight="bold">${node.costBadge.formattedCost}</text>
+    </g>`;
+        }
+
+        // SKU label (bottom-left, next to icon area)
+        if (node.skuLabel) {
+            const skuY = y + node.height - 10;
+            badges += `
+    <text x="${x + 36}" y="${skuY}" class="node-sku" fill="#666666" font-size="7" font-style="italic">
+      ${this.escapeXml(node.skuLabel)}
+    </text>`;
+        }
+
+        // CIDR range (for network resources)
+        if (node.cidrRange) {
+            const cidrY = y + node.height - 3;
+            badges += `
+    <text x="${x + 36}" y="${cidrY}" class="node-cidr" fill="#0078D4" font-size="7" font-family="monospace">
+      ${this.escapeXml(node.cidrRange)}
+    </text>`;
+        }
+
+        return badges;
+    }
+
+    /**
+     * Get color for security badge based on severity
+     */
+    private getSecurityBadgeColor(severity: string): string {
+        switch (severity) {
+            case 'critical': return '#A80000'; // Dark red
+            case 'high': return '#D83B01';     // Orange-red
+            case 'medium': return '#FFB900';   // Yellow
+            case 'low': return '#107C10';      // Green
+            case 'info': return '#0078D4';     // Blue
+            default: return '#666666';         // Gray
+        }
+    }
+
+    /**
+     * Get icon character for security severity
+     */
+    private getSecurityIcon(severity: string): string {
+        switch (severity) {
+            case 'critical': return '!';
+            case 'high': return '!';
+            case 'medium': return '⚠';
+            case 'low': return 'i';
+            case 'info': return 'i';
+            default: return '?';
+        }
+    }
+
+    /**
+     * Render data flow connections with typed styling
+     */
+    renderDataFlowConnections(nodes: DiagramNode[], offsetX: number, offsetY: number): string {
+        const nodeMap = new Map<string, DiagramNode>();
+        nodes.forEach(n => nodeMap.set(n.id, n));
+
+        let flows = '';
+
+        for (const node of nodes) {
+            if (!node.dataFlows) continue;
+
+            for (const flow of node.dataFlows) {
+                const target = nodeMap.get(flow.targetId);
+                if (!target) continue;
+
+                flows += this.renderDataFlowArrow(node, target, flow.flowType, flow.label, offsetX, offsetY);
+            }
+        }
+
+        return flows;
+    }
+
+    /**
+     * Render a single data flow arrow
+     */
+    private renderDataFlowArrow(
+        source: DiagramNode,
+        target: DiagramNode,
+        flowType: string,
+        label: string | undefined,
+        offsetX: number,
+        offsetY: number
+    ): string {
+        const srcCx = source.x + source.width / 2 + offsetX;
+        const srcCy = source.y + source.height / 2 + offsetY;
+        const tgtCx = target.x + target.width / 2 + offsetX;
+        const tgtCy = target.y + target.height / 2 + offsetY;
+
+        const dx = tgtCx - srcCx;
+        const dy = tgtCy - srcCy;
+
+        // Get flow styling
+        const flowStyle = this.getDataFlowStyle(flowType);
+
+        // Calculate path
+        let pathD: string;
+        let endX: number, endY: number;
+        let arrowAngle: number;
+        let midX: number, midY: number;
+
+        if (Math.abs(dx) >= Math.abs(dy)) {
+            const sx = dx > 0 ? source.x + source.width + offsetX : source.x + offsetX;
+            const tx = dx > 0 ? target.x + offsetX : target.x + target.width + offsetX;
+            midX = (sx + tx) / 2;
+            midY = (srcCy + tgtCy) / 2;
+            pathD = `M ${sx},${srcCy} C ${midX},${srcCy} ${midX},${tgtCy} ${tx},${tgtCy}`;
+            endX = tx; endY = tgtCy;
+            arrowAngle = dx > 0 ? -90 : 90;
+        } else {
+            const sy = dy > 0 ? source.y + source.height + offsetY : source.y + offsetY;
+            const ty = dy > 0 ? target.y + offsetY : target.y + target.height + offsetY;
+            midX = (srcCx + tgtCx) / 2;
+            midY = (sy + ty) / 2;
+            pathD = `M ${srcCx},${sy} C ${srcCx},${midY} ${tgtCx},${midY} ${tgtCx},${ty}`;
+            endX = tgtCx; endY = ty;
+            arrowAngle = dy > 0 ? 0 : 180;
+        }
+
+        // Render label if provided
+        let labelElement = '';
+        if (label) {
+            const labelX = (srcCx + tgtCx) / 2;
+            const labelY = (srcCy + tgtCy) / 2 - 4;
+            labelElement = `
+    <rect x="${labelX - 15}" y="${labelY - 8}" width="30" height="12" rx="2" fill="white" fill-opacity="0.9"/>
+    <text x="${labelX}" y="${labelY}" text-anchor="middle" fill="${flowStyle.color}" font-size="7" font-weight="bold">
+      ${this.escapeXml(label)}
+    </text>`;
+        }
+
+        return `
+  <g class="data-flow data-flow-${flowType}">
+    <path d="${pathD}" fill="none" stroke="${flowStyle.color}" stroke-width="2"
+          stroke-dasharray="${flowStyle.dashArray}" opacity="0.7"/>
+    <polygon points="0,0 -4,-8 4,-8" fill="${flowStyle.color}" opacity="0.7"
+             transform="translate(${endX},${endY}) rotate(${arrowAngle})"/>
+    ${labelElement}
+  </g>`;
+    }
+
+    /**
+     * Get styling for data flow type
+     */
+    private getDataFlowStyle(flowType: string): { color: string; dashArray: string } {
+        switch (flowType) {
+            case 'data':
+                return { color: '#0078D4', dashArray: '0' };        // Blue solid
+            case 'control':
+                return { color: '#8661C5', dashArray: '4,2' };      // Purple dashed
+            case 'event':
+                return { color: '#107C10', dashArray: '2,2' };      // Green dotted
+            case 'dependency':
+                return { color: '#666666', dashArray: '6,3' };      // Gray dashed
+            default:
+                return { color: '#999999', dashArray: '0' };        // Gray solid
+        }
     }
 
     private renderConnection(source: DiagramNode, target: DiagramNode, offsetX: number, offsetY: number): string {
@@ -1149,5 +1389,601 @@ export class DiagramRenderer {
 
         const svg = this.generateSVG(nodes);
         fs.writeFileSync(outputPath, svg, 'utf8');
+    }
+
+
+    /**
+     * Generate HTML with security indicators
+     */
+    generateDiagramWithSecurity(
+        nodes: DiagramNode[], 
+        connections: DiagramConnection[],
+        securityPostures: Map<string, SecurityPosture>,
+        costEstimates: Map<string, CostEstimate>,
+        skuInfo: Map<string, SKUInfo>,
+        tagCompliance: Map<string, TagCompliance>
+    ): string {
+        // Add security badges to nodes
+        const enhancedNodes = nodes.map(node => {
+            const nodeKey = `${node.resourceType}_${node.resourceName}`;
+            const security = securityPostures.get(nodeKey);
+            const cost = costEstimates.get(nodeKey);
+            const sku = skuInfo.get(nodeKey);
+            const tags = tagCompliance.get(nodeKey);
+            
+            return {
+                ...node,
+                securityBadges: this.generateSecurityBadges(security),
+                costBadge: cost ? this.generateCostBadge(cost) : null,
+                skuBadge: sku ? this.generateSKUBadge(sku) : null,
+                tagBadge: tags ? this.generateTagBadge(tags) : null
+            };
+        });
+
+        // Generate the enhanced HTML
+        return this.generateEnhancedHTML(enhancedNodes, connections);
+    }
+
+    private generateSecurityBadges(security?: SecurityPosture): string {
+        if (!security) return '';
+        
+        const badges: string[] = [];
+        
+        // Encryption badge
+        badges.push(`
+            <div class="security-badge ${security.isEncrypted ? 'badge-success' : 'badge-warning'}" 
+                 title="${security.isEncrypted ? 'Encrypted' : 'Not encrypted'}">
+                ${security.isEncrypted ? '🔒' : '🔓'}
+            </div>
+        `);
+        
+        // Public endpoint badge
+        badges.push(`
+            <div class="security-badge ${security.hasPublicEndpoint ? 'badge-danger' : 'badge-success'}" 
+                 title="${security.hasPublicEndpoint ? 'Has public endpoint' : 'Private only'}">
+                ${security.hasPublicEndpoint ? '🌐' : '🔒'}
+            </div>
+        `);
+        
+        // NSG badge
+        badges.push(`
+            <div class="security-badge ${security.hasNSG ? 'badge-success' : 'badge-warning'}" 
+                 title="${security.hasNSG ? 'Has NSG' : 'No NSG'}">
+                ${security.hasNSG ? '🛡️' : '⚠️'}
+            </div>
+        `);
+        
+        return badges.join('');
+    }
+
+    private generateCostBadge(cost: CostEstimate): string {
+        const formattedCost = new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: cost.currency,
+            minimumFractionDigits: 2
+        }).format(cost.monthlyCost);
+        
+        return `
+            <div class="cost-badge ${cost.monthlyCost > 100 ? 'badge-high' : 'badge-low'}" 
+                 title="Estimated monthly cost: ${formattedCost}">
+                💰 ${formattedCost}/mo
+            </div>
+        `;
+    }
+
+    private generateSKUBadge(sku: SKUInfo): string {
+        return `
+            <div class="sku-badge" title="Tier: ${sku.tier}, SKU: ${sku.sku}${sku.size ? ', Size: ' + sku.size : ''}">
+                🏷️ ${sku.tier}
+            </div>
+        `;
+    }
+
+    private generateTagBadge(tags: TagCompliance): string {
+        const status = tags.hasRequiredTags ? 'badge-success' : 'badge-warning';
+        const title = tags.hasRequiredTags 
+            ? 'All required tags present' 
+            : `Missing tags: ${tags.missingTags.join(', ')}`;
+        
+        return `
+            <div class="tag-badge ${status}" title="${title}">
+                📋 ${tags.hasRequiredTags ? '✓' : '⚠️'}
+            </div>
+        `;
+    }
+
+/**
+ * Generate CSS styles for the enhanced HTML diagram
+ */
+private generateStyles(): string {
+    return `
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        #diagramContainer {
+            position: relative;
+            width: 100%;
+            min-height: 600px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+        }
+        
+        .node {
+            position: absolute;
+            border: 1px solid #e1dfdd;
+            border-radius: 5px;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            transition: all 0.2s ease;
+            overflow: hidden;
+        }
+        
+        .node:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 1000;
+            transform: translateY(-2px);
+        }
+        
+        .node-header {
+            background-color: #f8f8f8;
+            border-bottom: 1px solid #e1dfdd;
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 12px;
+            color: #201f1e;
+        }
+        
+        .node-content {
+            padding: 12px;
+            font-size: 11px;
+            color: #605e5c;
+        }
+        
+        .node-icon {
+            float: left;
+            margin-right: 8px;
+            width: 24px;
+            height: 24px;
+        }
+        
+        .connection {
+            position: absolute;
+            pointer-events: none;
+            z-index: 1;
+        }
+        
+        .connection-line {
+            stroke: #a19f9d;
+            stroke-width: 1.5;
+            stroke-opacity: 0.6;
+            fill: none;
+        }
+        
+        .connection-label {
+            font-size: 10px;
+            fill: #605e5c;
+            background-color: white;
+            padding: 2px 4px;
+            border-radius: 3px;
+            border: 1px solid #e1dfdd;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            margin: 2px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: help;
+        }
+        
+        .badge-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .badge-warning {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .badge-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .badge-info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .security-badge, .cost-badge, .sku-badge, .tag-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            margin: 2px;
+            border-radius: 4px;
+            font-size: 10px;
+            cursor: help;
+        }
+        
+        .cost-badge {
+            background-color: #e8f4e8;
+            color: #0d632c;
+            border: 1px solid #c8e6c9;
+        }
+        
+        .sku-badge {
+            background-color: #e3f2fd;
+            color: #0d47a1;
+            border: 1px solid #bbdefb;
+        }
+        
+        .tag-badge {
+            background-color: #f3e5f5;
+            color: #4a148c;
+            border: 1px solid #e1bee7;
+        }
+        
+        .node-badges {
+            position: absolute;
+            top: -20px;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: center;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+        
+        .tooltip {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 10000;
+            max-width: 300px;
+            pointer-events: none;
+        }
+        
+        .legend {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            font-size: 12px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            margin-right: 8px;
+        }
+    `;
+}
+
+/**
+ * Generate SVG connection elements for HTML diagram
+ */
+private generateConnectionElements(connections: DiagramConnection[]): string {
+    let html = '';
+    
+    connections.forEach((conn, index) => {
+        const sourceNode = this.findNodeById(conn.sourceId);
+        const targetNode = this.findNodeById(conn.targetId);
+        
+        if (!sourceNode || !targetNode) return;
+        
+        // Calculate connection path
+        const sourceX = sourceNode.x + sourceNode.width / 2;
+        const sourceY = sourceNode.y + sourceNode.height / 2;
+        const targetX = targetNode.x + targetNode.width / 2;
+        const targetY = targetNode.y + targetNode.height / 2;
+        
+        // Simple straight line for now (you can enhance this with curved paths)
+        const midX = (sourceX + targetX) / 2;
+        const midY = (sourceY + targetY) / 2;
+        
+        const lineStyle = this.getConnectionStyle(conn.type);
+        
+        html += `
+            <svg class="connection" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: visible; z-index: 1;">
+                <defs>
+                    <marker id="arrowhead-${index}" markerWidth="10" markerHeight="7" 
+                            refX="10" refY="3.5" orient="auto">
+                        <polygon points="0 0, 10 3.5, 0 7" fill="${lineStyle.stroke}" />
+                    </marker>
+                </defs>
+                <line x1="${sourceX}" y1="${sourceY}" x2="${targetX}" y2="${targetY}"
+                      stroke="${lineStyle.stroke}"
+                      stroke-width="${lineStyle.strokeWidth}"
+                      stroke-dasharray="${lineStyle.strokeDasharray}"
+                      marker-end="url(#arrowhead-${index})"
+                      class="connection-line" />
+                ${conn.label ? `
+                    <text x="${midX}" y="${midY - 5}" text-anchor="middle" class="connection-label">
+                        ${this.escapeXml(conn.label)}
+                    </text>
+                ` : ''}
+            </svg>
+        `;
+    });
+    
+    return html;
+}
+
+/**
+ * Helper method to find node by ID (for the enhanced HTML generation)
+ */
+private findNodeById(nodeId: string): any {
+    // This would typically use your actual nodes array
+    // For now, returning a placeholder
+    return null;
+}
+
+/**
+ * Get connection style based on type
+ */
+private getConnectionStyle(type: DiagramConnection['type']): {
+    stroke: string;
+    strokeWidth: number;
+    strokeDasharray: string;
+} {
+    switch (type) {
+        case 'data':
+            return { stroke: '#107C10', strokeWidth: 2, strokeDasharray: '' };
+        case 'control':
+            return { stroke: '#0078D4', strokeWidth: 2, strokeDasharray: '' };
+        case 'security':
+            return { stroke: '#FF8C00', strokeWidth: 2, strokeDasharray: '5,2' };
+        case 'dependency':
+        default:
+            return { stroke: '#666666', strokeWidth: 1, strokeDasharray: '5,5' };
+    }
+}
+
+/**
+ * Generate JavaScript for interactive diagram
+ */
+private generateScript(): string {
+    return `
+        document.addEventListener('DOMContentLoaded', function() {
+            // Tooltip functionality
+            const tooltip = document.createElement('div');
+            tooltip.className = 'tooltip';
+            tooltip.style.display = 'none';
+            document.body.appendChild(tooltip);
+            
+            // Node hover effects
+            const nodes = document.querySelectorAll('.node');
+            nodes.forEach(node => {
+                node.addEventListener('mouseenter', function(e) {
+                    // Show tooltip with node details
+                    const nodeId = this.getAttribute('data-id');
+                    const nodeType = this.getAttribute('data-type');
+                    
+                    tooltip.innerHTML = \`
+                        <strong>\${nodeId}</strong><br>
+                        Type: \${nodeType}<br>
+                        Click for details
+                    \`;
+                    
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (e.pageX + 10) + 'px';
+                    tooltip.style.top = (e.pageY + 10) + 'px';
+                });
+                
+                node.addEventListener('mousemove', function(e) {
+                    tooltip.style.left = (e.pageX + 10) + 'px';
+                    tooltip.style.top = (e.pageY + 10) + 'px';
+                });
+                
+                node.addEventListener('mouseleave', function() {
+                    tooltip.style.display = 'none';
+                });
+                
+                // Click to highlight connections
+                node.addEventListener('click', function() {
+                    const nodeId = this.getAttribute('data-id');
+                    
+                    // Reset all nodes
+                    nodes.forEach(n => {
+                        n.style.borderColor = '#e1dfdd';
+                        n.style.backgroundColor = 'white';
+                    });
+                    
+                    // Highlight this node
+                    this.style.borderColor = '#0078D4';
+                    this.style.backgroundColor = '#e6f2ff';
+                    
+                    // Highlight connected nodes
+                    const connections = this.querySelectorAll('.connection');
+                    connections.forEach(conn => {
+                        const targetId = conn.getAttribute('data-target');
+                        const targetNode = document.querySelector(\`.node[data-id="\${targetId}"]\`);
+                        if (targetNode) {
+                            targetNode.style.borderColor = '#107C10';
+                            targetNode.style.backgroundColor = '#e8f4e8';
+                        }
+                    });
+                });
+            });
+            
+            // Legend creation
+            const legend = document.createElement('div');
+            legend.className = 'legend';
+            legend.innerHTML = \`
+                <h3 style="margin-top: 0; font-size: 14px;">Legend</h3>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #d4edda;"></div>
+                    <span>Secure</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #fff3cd;"></div>
+                    <span>Warning</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #f8d7da;"></div>
+                    <span>Critical</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #107C10; width: 20px; height: 2px;"></div>
+                    <span>Data Flow</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #0078D4; width: 20px; height: 2px;"></div>
+                    <span>Control Flow</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: #FF8C00; width: 20px; height: 2px;"></div>
+                    <span>Security</span>
+                </div>
+            \`;
+            document.body.appendChild(legend);
+            
+            // Keyboard shortcuts
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    // Reset all highlights
+                    nodes.forEach(n => {
+                        n.style.borderColor = '#e1dfdd';
+                        n.style.backgroundColor = 'white';
+                    });
+                }
+            });
+        });
+    `;
+}
+
+    private generateEnhancedHTML(nodes: any[], connections: DiagramConnection[]): string {
+        // This would be an enhanced version of your existing generateHTML method
+        // Add CSS styles for badges and update node rendering
+        const enhancedStyles = `
+            <style>
+                .security-badge, .cost-badge, .sku-badge, .tag-badge {
+                    display: inline-block;
+                    padding: 2px 6px;
+                    margin: 2px;
+                    border-radius: 4px;
+                    font-size: 10px;
+                    cursor: help;
+                }
+                
+                .badge-success {
+                    background-color: #d4edda;
+                    color: #155724;
+                    border: 1px solid #c3e6cb;
+                }
+                
+                .badge-warning {
+                    background-color: #fff3cd;
+                    color: #856404;
+                    border: 1px solid #ffeaa7;
+                }
+                
+                .badge-danger {
+                    background-color: #f8d7da;
+                    color: #721c24;
+                    border: 1px solid #f5c6cb;
+                }
+                
+                .badge-high {
+                    background-color: #f8d7da;
+                    color: #721c24;
+                }
+                
+                .badge-low {
+                    background-color: #d4edda;
+                    color: #155724;
+                }
+                
+                .node-badges {
+                    position: absolute;
+                    top: -20px;
+                    left: 0;
+                    right: 0;
+                    display: flex;
+                    justify-content: center;
+                    gap: 2px;
+                }
+                
+                .node-content {
+                    margin-top: 10px;
+                }
+            </style>
+        `;
+
+        // Update node rendering to include badges
+        const nodeElements = nodes.map(node => {
+            const badges = `
+                ${node.securityBadges || ''}
+                ${node.costBadge || ''}
+                ${node.skuBadge || ''}
+                ${node.tagBadge || ''}
+            `;
+            
+            return `
+                <div class="node" 
+                     data-id="${node.id}" 
+                     data-type="${node.resourceType}"
+                     style="left: ${node.x}px; top: ${node.y}px; width: ${node.width}px; height: ${node.height}px;">
+                    
+                    <div class="node-badges">
+                        ${badges}
+                    </div>
+                    
+                    <div class="node-content">
+                        ${node.content}
+                    </div>
+                </div>
+            `;
+        }).join('\n');
+
+        // Return the complete HTML (combine with your existing generateHTML logic)
+        return `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Azure Terraform Diagram with Security Analysis</title>
+                <style>
+                    ${this.generateStyles()}
+                    ${enhancedStyles}
+                </style>
+            </head>
+            <body>
+                <div id="diagramContainer">
+                    ${nodeElements}
+                    ${this.generateConnectionElements(connections)}
+                </div>
+                <script>
+                    ${this.generateScript()}
+                </script>
+            </body>
+            </html>
+        `;
     }
 }
